@@ -713,6 +713,11 @@ pub struct Prepared {
     cut: Option<TextureData>,
     /// Textures prepared on the worker, by file (shared by the tiles of a batch).
     images: Arc<HashMap<PathBuf, Arc<TextureData>>>,
+    /// The PBR sets beside those textures (`omsi_texture::pbr`), packed on the worker for
+    /// the same reason: `upload_step` hands them to `Renderer::add_pbr_maps` as it puts the
+    /// diffuse texture up. Empty for batches of more than 16 tiles (see `cut_terrain`),
+    /// whose textures `GpuCache::texture` reads - and attaches the sets to - itself.
+    pbr: Arc<HashMap<PathBuf, omsi_texture::pbr::PbrImages>>,
 }
 
 /// A prepared tile on its way to the GPU (see [`World::begin_upload`]).
@@ -4841,6 +4846,7 @@ impl World {
             light_map: light_map.map(|i| tile_texture(i, false)),
             cut: None,
             images: Arc::new(HashMap::new()),
+            pbr: Arc::new(HashMap::new()),
         })
     }
 
@@ -5178,8 +5184,10 @@ impl World {
             }
         }
         // The textures of object types, splines and trees that are not on the GPU yet are
-        // decoded here instead of on the thread that draws. A big batch (a whole map at
-        // once) decodes them as it uploads instead: all at once they would not fit.
+        // decoded here instead of on the thread that draws, and the PBR sets beside them
+        // with them (a normal map must not be decoded while a frame is drawn). A big batch
+        // (a whole map at once) decodes them as it uploads instead: all at once they would
+        // not fit.
         if prepared.len() <= 16 {
             let mut wanted: Vec<(String, Vec<PathBuf>)> = prepared
                 .iter()
@@ -5187,19 +5195,28 @@ impl World {
                 .collect();
             wanted.sort();
             wanted.dedup();
-            let decoded: Vec<(PathBuf, Arc<TextureData>)> = wanted
+            let decoded: Vec<(PathBuf, Arc<TextureData>, Option<omsi_texture::pbr::PbrImages>)> = wanted
                 .par_iter()
                 .filter_map(|(name, dirs)| {
                     let dirs_ref: Vec<&Path> = dirs.iter().map(|d| d.as_path()).collect();
                     let path = omsi_texture::find_texture(name, &dirs_ref)?;
                     let (img, _) = omsi_texture::gpu::load_gpu(&path).ok()?;
-                    Some((path, Arc::new(img)))
+                    let pbr = pbr_set(&path);
+                    Some((path, Arc::new(img), pbr))
                 })
                 .collect();
-            let decoded: Arc<HashMap<PathBuf, Arc<TextureData>>> =
-                Arc::new(decoded.into_iter().collect());
+            let mut images: HashMap<PathBuf, Arc<TextureData>> = HashMap::new();
+            let mut pbr: HashMap<PathBuf, omsi_texture::pbr::PbrImages> = HashMap::new();
+            for (path, img, set) in decoded {
+                images.insert(path.clone(), img);
+                if let Some(set) = set {
+                    pbr.insert(path, set);
+                }
+            }
+            let (images, pbr) = (Arc::new(images), Arc::new(pbr));
             for p in prepared.iter_mut() {
-                p.images = decoded.clone();
+                p.images = images.clone();
+                p.pbr = pbr.clone();
             }
         }
     }
@@ -5848,6 +5865,12 @@ impl World {
                 if !gpu.textures.contains_key(&path) {
                     if let Some(img) = u.prepared.images.get(&path) {
                         let id = gpu.add_data(renderer, scene, img);
+                        // the PBR set the loader packed for it (`Prepared::pbr`): without
+                        // this the cache hit in `GpuCache::texture` skipped the attach and
+                        // no scenery object, spline or tree ever saw its maps
+                        if let Some(set) = u.prepared.pbr.get(&path) {
+                            renderer.add_pbr_maps(scene, id, set);
+                        }
                         gpu.textures.insert(
                             path.clone(),
                             TexEntry {
@@ -9379,17 +9402,28 @@ fn bump_key(path: &Path) -> PathBuf {
 }
 
 /// A PBR set beside the diffuse texture `path` (`foo_n.png` and the rest, see
-/// `omsi_texture::pbr`), put up and tied to texture `id` for the materials made with it.
-pub(crate) fn attach_pbr(renderer: &Renderer, scene: &mut Scene, path: &Path, id: TextureId) {
+/// `omsi_texture::pbr`), read and packed for the GPU (None: nothing usable, or
+/// `OMSI_NO_PBR`). Called on the loader thread where the texture itself is decoded
+/// (`Prepared::pbr`) and on the thread that draws for vehicle textures.
+pub(crate) fn pbr_set(path: &Path) -> Option<omsi_texture::pbr::PbrImages> {
     if omsi_cfg::env::var_os("OMSI_NO_PBR").is_some() {
-        return;
+        return None;
     }
     let files = omsi_texture::pbr::find(path);
     if files.is_empty() {
-        return;
+        return None;
     }
-    if let Some(set) = omsi_texture::pbr::load_set(&files) {
+    let set = omsi_texture::pbr::load_set(&files);
+    if let Some(set) = &set {
         log::info!("PBR maps for {}: normal {:?}, occlusion/roughness/metal {:?}", path.display(), set.normal.as_ref().map(|i| (i.width, i.height)), set.flags);
+    }
+    set
+}
+
+/// The PBR set beside the diffuse texture `path`, put up and tied to texture `id` for the
+/// materials made with it.
+pub(crate) fn attach_pbr(renderer: &Renderer, scene: &mut Scene, path: &Path, id: TextureId) {
+    if let Some(set) = pbr_set(path) {
         renderer.add_pbr_maps(scene, id, &set);
     }
 }
