@@ -22,6 +22,9 @@
 use crate::scene::{ObjectEdit, World};
 use glam::{DVec3, Vec3};
 use hashbrown::HashMap;
+use omsi_editor_core::codec::{decode, encode};
+use omsi_editor_core::ground::{aim, shape, GroundAction, BRUSH_DEFAULT};
+use omsi_editor_core::{add_copies, clamp_brush, record_lines, rewrite_tile, NewRecord};
 use std::path::{Path, PathBuf};
 
 /// A new object: a copy of `template` (a map object), moved and turned from it, perhaps of
@@ -55,9 +58,6 @@ pub struct Editor {
     brush: f64,
 }
 
-/// The ground brush's radius when none is set, and its limits (m).
-const BRUSH: (f64, f64, f64) = (6.0, 1.0, 60.0);
-
 /// What a key does in the editor.
 pub enum Action {
     Copy,
@@ -81,29 +81,9 @@ impl Editor {
     /// The objects in front of the camera, those nearest the middle of the view first.
     pub fn pick(&mut self, world: &World, eye: DVec3, forward: Vec3) -> Option<i64> {
         self.editing_added = None;
-        let f = forward.as_dvec3().normalize_or_zero();
-        let objects = world.edit_objects.lock();
-        let edits = world.object_edits.lock();
-        let mut scored: Vec<(f64, i64)> = objects
-            .iter()
-            .filter_map(|(id, o)| {
-                let e = edits.get(id).copied().unwrap_or_default();
-                if e.deleted {
-                    return None;
-                }
-                let d = o.pos + e.moved - eye;
-                let along = d.dot(f);
-                if !(1.0..150.0).contains(&along) {
-                    return None;
-                }
-                // off the view's axis, as an angle (a near post beside the middle before a
-                // far house right in it)
-                let off = (d - f * along).length() / along;
-                (off < 0.35).then_some((off + along * 0.0015, *id))
-            })
-            .collect();
-        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
-        self.candidates = scored.into_iter().map(|s| s.1).take(12).collect();
+        // the picking itself is the world's, so a click chooses the same object here and in
+        // the editor program (see `World::pick_candidates`)
+        self.candidates = world.pick_candidates(eye, forward, 150.0).into_iter().take(12).collect();
         self.next = 1;
         self.selected = self.candidates.first().copied();
         self.selected
@@ -276,30 +256,22 @@ impl Editor {
         }
     }
 
-    /// Where the middle of the view meets the ground (within 400 m).
+    /// Where the middle of the view meets the ground (within 400 m): the kernel's own ray walk,
+    /// the one the standalone editor aims its brush with.
     pub fn aim(world: &World, eye: DVec3, forward: Vec3) -> Option<DVec3> {
-        let f = forward.as_dvec3().normalize_or_zero();
-        let mut t = 0.5;
-        while t < 400.0 {
-            let p = eye + f * t;
-            if world.ground_terrain(p.x, p.y).is_some_and(|g| p.z <= g) {
-                return Some(p);
-            }
-            t += if t < 50.0 { 0.25 } else { 1.0 };
-        }
-        None
+        aim(|x, y| world.ground_terrain(x, y), eye, forward.as_dvec3(), 400.0)
     }
 
     /// The brush's radius now.
     pub fn brush(&self) -> f64 {
-        if self.brush > 0.0 { self.brush } else { BRUSH.0 }
+        clamp_brush(if self.brush > 0.0 { self.brush } else { BRUSH_DEFAULT })
     }
 
     /// Shape the ground about `at` (raise by `Ground`'s metres, or flatten to the height at
     /// `at`); `Brush` resizes the brush. Returns what to say and the tiles to read again.
     pub fn ground(&mut self, world: &World, at: Option<DVec3>, action: &Action) -> (String, Vec<(i32, i32)>) {
         if let Action::Brush(f) = action {
-            self.brush = (self.brush() * f).clamp(BRUSH.1, BRUSH.2);
+            self.brush = clamp_brush(self.brush() * f);
             return (format!("Ground brush: {:.1} m", self.brush), Vec::new());
         }
         let Some(at) = at else { return ("Point the view at the ground".into(), Vec::new()) };
@@ -318,7 +290,12 @@ impl Editor {
                     edits.insert((tx, ty), t);
                 }
                 let t = edits.get_mut(&(tx, ty)).unwrap();
-                if shape(t, (tx as f64 * size, ty as f64 * size), at, r, action, target) {
+                // the same brush the standalone editor runs, on this tile's ground
+                let brush_action = match action {
+                    Action::Ground(m) => GroundAction::Raise(*m),
+                    _ => GroundAction::Flatten(target),
+                };
+                if shape(t, (tx as f64 * size, ty as f64 * size), at, r, brush_action).is_some() {
                     changed.push((tx, ty));
                 }
             }
@@ -333,6 +310,11 @@ impl Editor {
 
     /// Write every tile with edits as a copy under `content` (the map's own folder there),
     /// from the file the game reads it from. Returns the files written.
+    ///
+    /// The record rewriting is `omsi-editor-core`'s, the same code the standalone editor runs,
+    /// so a copy made here and a copy made there are written the same way. In particular a copy
+    /// carries its template's own record lines with it (taken from the text as it was read), so
+    /// it survives the same save taking the template away.
     pub fn save(&self, world: &World, map_rel: &str, content: &Path, original: &Path) -> Result<Vec<PathBuf>, String> {
         let edits = world.object_edits.lock().clone();
         let mut by_tile: HashMap<(i32, i32), HashMap<i64, ObjectEdit>> = HashMap::new();
@@ -340,17 +322,49 @@ impl Editor {
             let Some(tile) = self.tiles.get(&id) else { continue };
             by_tile.entry(*tile).or_default().insert(id, e);
         }
+        // every tile this save touches: the ones an object was edited in, and the ones a copy
+        // goes into. Each file is read and decoded once, and the same text is used both to take
+        // a copy's template record and to be written back.
+        let mut touched: Vec<(i32, i32)> = by_tile.keys().copied().collect();
+        for a in self.added.iter().filter(|a| !a.deleted) {
+            if !touched.contains(&a.tile) {
+                touched.push(a.tile);
+            }
+        }
+        let mut sources: HashMap<(i32, i32), (PathBuf, String, _)> = HashMap::new();
+        for id in &touched {
+            let src = world.tile_source(id.0, id.1).ok_or_else(|| format!("tile ({}, {}) is not in the map", id.0, id.1))?;
+            let bytes = omsi_cfg::vfs::read(&src).map_err(|e| format!("{}: {e}", src.display()))?;
+            let (text, enc) = decode(&bytes);
+            sources.insert(*id, (src, text, enc));
+        }
         let mut copies_by_tile: HashMap<(i32, i32), Vec<NewRecord>> = HashMap::new();
         for a in self.added.iter().filter(|a| !a.deleted) {
+            let Some((_, text, _)) = sources.get(&a.tile) else { continue };
             let file = a.sco.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-            let offset = a.base + a.moved - world.edit_objects.lock().get(&a.template).map(|o| o.pos).unwrap_or(a.base);
-            copies_by_tile.entry(a.tile).or_default().push(NewRecord { template: a.template, id: a.id, file, moved: offset, turned: a.base_heading + a.turned - template_heading(world, a.template).unwrap_or(a.base_heading) });
+            // measured against where the template's record puts it *on disk* - the record a copy
+            // is written from is the one the file has, not where the template has since moved to
+            let template_pos = world.edit_objects.lock().get(&a.template).map(|o| o.pos).unwrap_or(a.base);
+            let offset = a.base + a.moved - template_pos;
+            let turned = a.base_heading + a.turned - template_heading(world, a.template).unwrap_or(a.base_heading);
+            copies_by_tile.entry(a.tile).or_default().push(NewRecord {
+                template: a.template,
+                id: a.id,
+                file,
+                moved: offset,
+                turned,
+                template_lines: record_lines(text, a.template).unwrap_or_default(),
+            });
             by_tile.entry(a.tile).or_default();
         }
         let map_dir = Path::new(map_rel).parent().unwrap_or(Path::new(""));
         let mut written = Vec::new();
         for ((tx, ty), edits) in by_tile {
-            let src = world.tile_source(tx, ty).ok_or_else(|| format!("tile ({tx}, {ty}) is not in the map"))?;
+            let (src, text, enc) = &sources[&(tx, ty)];
+            let copies = copies_by_tile.get(&(tx, ty)).map(|v| v.as_slice()).unwrap_or(&[]);
+            if edits.is_empty() && copies.is_empty() {
+                continue;
+            }
             let name = src.file_name().ok_or("tile without a name")?.to_owned();
             let out = content.join(map_dir).join(&name);
             // never into the installation itself
@@ -359,16 +373,14 @@ impl Editor {
                     return Err(format!("{} lies in the original installation: not written", out.display()));
                 }
             }
-            let bytes = omsi_cfg::vfs::read(&src).map_err(|e| format!("{}: {e}", src.display()))?;
-            let (text, enc) = decode(&bytes);
-            let (new_text, n) = rewrite_tile(&text, &edits);
-            let (new_text, c) = add_copies(&new_text, copies_by_tile.get(&(tx, ty)).map(|v| v.as_slice()).unwrap_or(&[]));
+            let (new_text, n) = rewrite_tile(text, &edits);
+            let (new_text, c) = add_copies(&new_text, copies);
             let n = n + c;
             if n == 0 {
                 return Err(format!("the objects edited were not found in {}", src.display()));
             }
             std::fs::create_dir_all(out.parent().unwrap_or(Path::new("."))).map_err(|e| e.to_string())?;
-            let data = encode(&new_text, enc);
+            let data = encode(&new_text, *enc);
             std::fs::write(&out, data).map_err(|e| format!("{}: {e}", out.display()))?;
             log::info!("object editor: {} objects of tile ({tx}, {ty}) changed, written to {}", n, out.display());
             written.push(out);
@@ -393,200 +405,18 @@ impl Editor {
     }
 }
 
-/// Shape one tile's ground (its origin `o`) about `at` within `r`: raise by `Ground`'s
-/// metres, or bring toward `target` (`Flatten`), weighted smoothly to nothing at the rim.
-/// True when a point moved.
-fn shape(t: &mut omsi_map::Terrain, o: (f64, f64), at: DVec3, r: f64, action: &Action, target: f64) -> bool {
-    let n = t.samples();
-    let step = omsi_map::tile_size() / t.cells as f64;
-    let mut any = false;
-    for iy in 0..n {
-        for ix in 0..n {
-            let (x, y) = (o.0 + ix as f64 * step, o.1 + iy as f64 * step);
-            let d = ((x - at.x).powi(2) + (y - at.y).powi(2)).sqrt();
-            if d >= r {
-                continue;
-            }
-            let w = (1.0 - (d / r).powi(2)).powi(2);
-            let h = &mut t.heights[iy * n + ix];
-            let new = match action {
-                Action::Ground(m) => *h as f64 + m * w,
-                _ => *h as f64 + (target - *h as f64) * w.min(1.0),
-            };
-            if (new - *h as f64).abs() > 1e-5 {
-                *h = new as f32;
-                any = true;
-            }
-        }
-    }
-    any
-}
-
-/// The heading of map object `id` as it stands now (its edits included).
+/// The heading map object `id` has *on disk* - its tile record's own heading, not counting
+/// anything done to it this session.
+///
+/// A copy's record is its template's record with a delta added ([`omsi_editor_core::NewRecord`]),
+/// so the delta has to be measured against the record's heading. Adding this session's turn here
+/// would eat the template's own turn: a template turned 30° and then copied would be drawn at
+/// 30° but written at 0°.
 fn template_heading(world: &World, id: i64) -> Option<f64> {
     let objects = world.edit_objects.lock();
     let o = objects.get(&id)?;
-    let e = world.object_edits.lock().get(&id).copied().unwrap_or_default();
     let f = o.xf.transform_vector3(Vec3::Y);
-    Some((f.x as f64).atan2(f.y as f64).to_degrees() + e.turned)
-}
-
-/// A new object for the tile file: a copy of `template`'s record with its own id, another
-/// file name of the same folder (or the same), moved and turned from the template.
-pub struct NewRecord {
-    pub template: i64,
-    pub id: i64,
-    pub file: String,
-    pub moved: DVec3,
-    pub turned: f64,
-}
-
-/// The tile file with `copies` added, each record after its template's. Returns the text
-/// and how many were added.
-pub fn add_copies(text: &str, copies: &[NewRecord]) -> (String, usize) {
-    if copies.is_empty() {
-        return (text.to_string(), 0);
-    }
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let body = |l: &str| l.trim_end_matches(['\r', '\n']).to_string();
-    let ending = |l: &str| l[l.trim_end_matches(['\r', '\n']).len()..].to_string();
-    let mut out = String::with_capacity(text.len() + copies.len() * 200);
-    let mut added = 0;
-    let mut i = 0;
-    while i < lines.len() {
-        let is_object = body(lines[i]).trim().eq_ignore_ascii_case("[object]");
-        let id = lines.get(i + 3).and_then(|l| body(l).trim().parse::<i64>().ok());
-        let mine: Vec<&NewRecord> = if is_object { copies.iter().filter(|c| Some(c.template) == id).collect() } else { Vec::new() };
-        if mine.is_empty() {
-            out.push_str(lines[i]);
-            i += 1;
-            continue;
-        }
-        // the template's record, up to the next keyword
-        let start = i;
-        i += 1;
-        while i < lines.len() && !body(lines[i]).trim_start().starts_with('[') {
-            i += 1;
-        }
-        let record = &lines[start..i];
-        for l in record {
-            out.push_str(l);
-        }
-        let eol = ending(record[0]);
-        // (a blank line between records, as the editor writes them)
-        if !record.last().map(|l| body(l).trim().is_empty()).unwrap_or(false) {
-            out.push_str(&eol);
-        }
-        for c in mine {
-            for (k, l) in record.iter().enumerate() {
-                let b = body(l);
-                let new = match k {
-                    // the file: the copy's name in the template's folder
-                    2 => match b.rfind(['\\', '/']) {
-                        Some(p) => format!("{}{}", &b[..=p], c.file),
-                        None => c.file.clone(),
-                    },
-                    3 => c.id.to_string(),
-                    4..=7 => match b.trim().parse::<f64>() {
-                        Ok(v) => num(v + [c.moved.x, c.moved.y, c.moved.z, c.turned][k - 4]),
-                        Err(_) => b.clone(),
-                    },
-                    _ => b.clone(),
-                };
-                out.push_str(&new);
-                out.push_str(&ending(l));
-            }
-            if !record.last().map(|l| body(l).trim().is_empty()).unwrap_or(false) {
-                out.push_str(&eol);
-            }
-            added += 1;
-        }
-    }
-    (out, added)
-}
-
-/// How a tile file is written: OMSI's editor saves UTF-16 (little endian, with its byte
-/// order mark); hand-made ones are ASCII or Latin-1.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Encoding {
-    Utf8,
-    Latin1,
-    Utf16Le,
-}
-
-fn decode(bytes: &[u8]) -> (String, Encoding) {
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        return (String::from_utf16_lossy(&units), Encoding::Utf16Le);
-    }
-    match String::from_utf8(bytes.to_vec()) {
-        Ok(t) => (t, Encoding::Utf8),
-        Err(_) => (bytes.iter().map(|&b| b as char).collect(), Encoding::Latin1),
-    }
-}
-
-fn encode(text: &str, enc: Encoding) -> Vec<u8> {
-    match enc {
-        Encoding::Utf8 => text.as_bytes().to_vec(),
-        Encoding::Latin1 => text.chars().map(|c| c as u32 as u8).collect(),
-        Encoding::Utf16Le => [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(|u| u.to_le_bytes())).collect(),
-    }
-}
-
-/// A number as a tile file writes it.
-fn num(v: f64) -> String {
-    let s = format!("{v:.4}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s == "-0" { "0".into() } else { s.to_string() }
-}
-
-/// The tile file with the edits applied to its `[object]` records (by map id): a moved or
-/// turned object gets its position (x, y, height over the ground) and heading changed, a
-/// deleted one loses its record. Everything else stays as it was, line endings included.
-/// Returns the text and how many records changed.
-pub fn rewrite_tile(text: &str, edits: &HashMap<i64, ObjectEdit>) -> (String, usize) {
-    let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    let body = |l: &str| l.trim_end_matches(['\r', '\n']).to_string();
-    let ending = |l: &str| l[l.trim_end_matches(['\r', '\n']).len()..].to_string();
-    let mut out = String::with_capacity(text.len());
-    let mut changed = 0;
-    let mut i = 0;
-    while i < lines.len() {
-        let is_object = body(lines[i]).trim().eq_ignore_ascii_case("[object]");
-        let id = lines.get(i + 3).and_then(|l| body(l).trim().parse::<i64>().ok());
-        let edit = if is_object { id.and_then(|id| edits.get(&id)) } else { None };
-        let Some(e) = edit else {
-            out.push_str(lines[i]);
-            i += 1;
-            continue;
-        };
-        changed += 1;
-        if e.deleted {
-            // the record up to the next keyword
-            i += 1;
-            while i < lines.len() && !body(lines[i]).trim_start().starts_with('[') {
-                i += 1;
-            }
-            continue;
-        }
-        // [object], 0, file, id, x, y, z, heading, …
-        for k in 0..4 {
-            out.push_str(lines[i + k]);
-        }
-        let deltas = [e.moved.x, e.moved.y, e.moved.z, e.turned];
-        for (k, d) in deltas.iter().enumerate() {
-            let Some(l) = lines.get(i + 4 + k) else { break };
-            match body(l).trim().parse::<f64>() {
-                Ok(v) if *d != 0.0 => {
-                    out.push_str(&num(v + d));
-                    out.push_str(&ending(l));
-                }
-                _ => out.push_str(l),
-            }
-        }
-        i += 8;
-    }
-    (out, changed)
+    Some((f.x as f64).atan2(f.y as f64).to_degrees())
 }
 
 /// The editor's key for `code` (with Shift for the fine steps), as the camera faces `yaw`
@@ -622,59 +452,4 @@ pub fn action_for(code: winit::keyboard::KeyCode, shift: bool, ctrl: bool, yaw: 
         K::Escape => Action::Leave,
         _ => return None,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_brush_raises_the_middle_most_and_not_its_rim() {
-        let mut t = omsi_map::Terrain::flat();
-        let size = omsi_map::tile_size();
-        let at = DVec3::new(size * 0.5, size * 0.5, 0.0);
-        assert!(shape(&mut t, (0.0, 0.0), at, 12.0, &Action::Ground(1.0), 0.0));
-        assert!((t.sample(at.x as f32, at.y as f32) - 1.0).abs() < 1e-4);
-        assert_eq!(t.sample(at.x as f32 + 18.0, at.y as f32), 0.0);
-        // flattened back to 0 where the weight is full
-        shape(&mut t, (0.0, 0.0), at, 12.0, &Action::Flatten, 0.0);
-        assert!(t.sample(at.x as f32, at.y as f32).abs() < 1e-4);
-        assert_eq!(omsi_map::Terrain::parse(&t.to_bytes()).unwrap(), t);
-    }
-
-    const TILE: &str = "[version]\r\n4\r\n\r\n[object]\r\n0\r\nSceneryobjects\\a.sco\r\n7\r\n5\r\n6\r\n0.25\r\n90\r\n0\r\n0\r\n0\r\n\r\nObject Nr. 1\r\n[object]\r\n0\r\nSceneryobjects\\b.sco\r\n8\r\n1\r\n2\r\n0\r\n0\r\n0\r\n0\r\n2\r\nHalt\r\nx\r\n\r\n[spline]\r\n0\r\n";
-
-    #[test]
-    fn a_moved_object_changes_its_lines_and_a_deleted_one_goes() {
-        let mut edits = HashMap::new();
-        edits.insert(7, ObjectEdit { moved: DVec3::new(1.5, -1.0, 0.0), turned: 12.5, deleted: false });
-        edits.insert(8, ObjectEdit { deleted: true, ..Default::default() });
-        let (out, n) = rewrite_tile(TILE, &edits);
-        assert_eq!(n, 2);
-        assert!(out.contains("[object]\r\n0\r\nSceneryobjects\\a.sco\r\n7\r\n6.5\r\n5\r\n0.25\r\n102.5\r\n0\r\n"), "{out:?}");
-        assert!(!out.contains("b.sco") && !out.contains("Halt"), "{out:?}");
-        assert!(out.ends_with("[spline]\r\n0\r\n"));
-        // nothing to do: the same text
-        assert_eq!(rewrite_tile(TILE, &HashMap::new()), (TILE.to_string(), 0));
-    }
-
-    #[test]
-    fn a_utf16_tile_is_written_back_as_utf16() {
-        let bytes = encode(TILE, Encoding::Utf16Le);
-        assert_eq!(&bytes[..4], &[0xFF, 0xFE, b'[', 0]);
-        let (text, enc) = decode(&bytes);
-        assert_eq!((text.as_str(), enc), (TILE, Encoding::Utf16Le));
-    }
-}
-
-#[cfg(test)]
-mod copy_tests {
-    #[test]
-    fn a_copy_follows_its_template_with_its_own_id() {
-        let text = "[object]\r\n0\r\nSceneryobjects\\A\\post.sco\r\n17\r\n10\r\n20\r\n0\r\n90\r\n\r\n[object]\r\n0\r\nx.sco\r\n18\r\n1\r\n1\r\n0\r\n0\r\n";
-        let (out, n) = super::add_copies(text, &[super::NewRecord { template: 17, id: 99, file: "lamp.sco".into(), moved: glam::DVec3::new(2.0, 0.0, 0.0), turned: 10.0 }]);
-        assert_eq!(n, 1);
-        assert!(out.contains("Sceneryobjects\\A\\lamp.sco\r\n99\r\n12\r\n20\r\n0\r\n100\r\n"), "{out}");
-        assert!(out.contains("[object]\r\n0\r\nx.sco\r\n18"));
-    }
 }

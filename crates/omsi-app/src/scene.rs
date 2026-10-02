@@ -740,12 +740,13 @@ pub struct EditObject {
 
 /// What the object editor did to one object: moved by `moved` (m), turned by `turned`
 /// (degrees clockwise, as a map object's heading), or taken away.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ObjectEdit {
-    pub moved: DVec3,
-    pub turned: f64,
-    pub deleted: bool,
-}
+///
+/// This is `omsi-editor-core`'s own type, re-exported rather than copied: the in-game editor
+/// and the standalone `openomsi-editor` describe an edit in the same terms, and the record a
+/// save writes comes out of the same code. A second definition here is how the two would drift
+/// apart - and the game's copy would keep saying "moved" in metres while the file it wrote said
+/// something else.
+pub use omsi_editor_core::ObjectEdit;
 
 /// A parked car of a loaded tile (see [`World::parked_objects`]).
 #[derive(Clone)]
@@ -3117,6 +3118,15 @@ impl World {
             v
         };
         let tiles = self.map_tiles();
+        // Where the wait for the whole map goes: reading the tile files, building the
+        // splines' lanes, placing the objects. Summed over the rayon threads, so the three
+        // add up to more than the wall clock the last log line reports.
+        let (tiles_ns, spline_ns, object_ns) = (
+            std::sync::atomic::AtomicU64::new(0),
+            std::sync::atomic::AtomicU64::new(0),
+            std::sync::atomic::AtomicU64::new(0),
+        );
+        let ns = |n: &std::sync::atomic::AtomicU64| n.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9;
         #[allow(clippy::type_complexity)]
         let parts: Vec<(Vec<Lane>, Vec<(i64, DVec3)>, Vec<(DVec3, f64, String)>, Vec<(Vec<DVec3>, f32)>)> = tiles
             .par_iter()
@@ -3126,11 +3136,14 @@ impl World {
                 let mut positions = Vec::new();
                 let mut signs = Vec::new();
                 let mut roads = Vec::new();
+                let t_tile = std::time::Instant::now();
                 let Some(tile) = crate::tiles::read_tile(path, &self.chrono_dirs.read()) else {
                     return (lanes, positions, signs, roads);
                 };
+                tiles_ns.fetch_add(t_tile.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 let origin2 = DVec2::new(tx as f64 * tile_size(), ty as f64 * tile_size());
                 let terrain = Terrain::load(&crate::tiles::terrain_file(&tile, path)).unwrap_or_else(|_| Terrain::flat());
+                let t_spline = std::time::Instant::now();
                 for sp in tile.splines.iter().filter(|s| !s.deleted && !s.file.trim().is_empty()) {
                     let Some(st) = self.spline_type(&sp.file) else { continue };
                     if !st.def.paths.iter().any(|p| p.kind == 0) {
@@ -3157,6 +3170,8 @@ impl World {
                     }
                     lanes.extend(new_lanes);
                 }
+                spline_ns.fetch_add(t_spline.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                let t_object = std::time::Instant::now();
                 for o in &tile.objects {
                     if o.file.trim().is_empty() {
                         continue;
@@ -3183,6 +3198,7 @@ impl World {
                         lanes.extend(object_lanes(&sco, pos, [o.rot[0], 0.0, 0.0], None, (tx, ty), o.id, &o.rules));
                     }
                 }
+                object_ns.fetch_add(t_object.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                 (lanes, positions, signs, roads)
             })
             .collect();
@@ -3198,6 +3214,14 @@ impl World {
         }
         log::info!("navigation map: {} roads without a path for cars", roads.len());
         log::info!("navigation map: {} tiles, {} lanes, {} objects placed, {} street name signs, {} object types, {:.1} s", tiles.len(), lanes.len(), positions.len(), signs.len(), scos.lock().len(), t0.elapsed().as_secs_f64());
+        log::info!(
+            "navigation map: reading the tiles {:.2} s, the splines' lanes {:.2} s, the objects {:.2} s - summed over the {} threads that did it ({:.2} s of work)",
+            ns(&tiles_ns),
+            ns(&spline_ns),
+            ns(&object_ns),
+            rayon::current_num_threads(),
+            ns(&tiles_ns) + ns(&spline_ns) + ns(&object_ns)
+        );
         NavigationMap { lanes, road_surfaces: roads, places: positions, signs }
     }
 
@@ -7513,6 +7537,39 @@ impl World {
             }
         }
         self.refresh_tile_lists();
+    }
+
+    /// The map objects a ray from `eye` along `forward` picks up, nearest first - how a click
+    /// chooses one.
+    ///
+    /// Angular rather than by distance, so a near post beside the middle of the view comes
+    /// before a far house right in it, and only what is loaded is looked at - which is
+    /// exactly what is on the screen. `reach` is how far a click can pick something up (m).
+    pub fn pick_candidates(&self, eye: DVec3, forward: glam::Vec3, reach: f64) -> Vec<i64> {
+        let f = forward.as_dvec3().normalize_or_zero();
+        if f == DVec3::ZERO {
+            return Vec::new();
+        }
+        let objects = self.edit_objects.lock();
+        let edits = self.object_edits.lock();
+        let mut scored: Vec<(f64, i64)> = objects
+            .iter()
+            .filter_map(|(id, o)| {
+                let e = edits.get(id).copied().unwrap_or_default();
+                if e.deleted {
+                    return None;
+                }
+                let d = o.pos + e.moved - eye;
+                let along = d.dot(f);
+                if !(1.0..reach).contains(&along) {
+                    return None;
+                }
+                let off = (d - f * along).length() / along;
+                (off < 0.35).then_some((off + along * 0.0015, *id))
+            })
+            .collect();
+        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+        scored.into_iter().map(|s| s.1).collect()
     }
 
     /// The file tile (tx, ty) is read from, and the map folder's place relative to `root`.

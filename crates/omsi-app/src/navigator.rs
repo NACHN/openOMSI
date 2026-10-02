@@ -404,13 +404,7 @@ impl Navigator {
         std::thread::Builder::new()
             .name("navigator map".into())
             .spawn(move || {
-                let m = world.navigation_map();
-                let mut net = Network { lanes: m.lanes, ..Default::default() };
-                net.link(1.5);
-                confirm_road_surfaces(&mut net, &m.road_surfaces);
-                probe_lanes(&net);
-                let streets = build_streets(&net, &m.signs);
-                let _ = tx.send((net, m.places, streets));
+                let _ = tx.send(assemble(world.navigation_map()));
             })
             .ok();
         self.building = Some(rx);
@@ -418,14 +412,10 @@ impl Navigator {
 
     /// The map's network given at once (an offscreen picture reads it on its own thread).
     pub fn set_map(&mut self, map: crate::scene::NavigationMap) {
-        let mut net = Network { lanes: map.lanes, ..Default::default() };
-        net.link(1.5);
-        confirm_road_surfaces(&mut net, &map.road_surfaces);
-        probe_lanes(&net);
-        self.streets = Some(std::sync::Arc::new(build_streets(&net, &map.signs)));
-        let global = std::sync::Arc::new(net);
-        self.global = Some(global);
-        self.stop_pos = std::sync::Arc::new(map.places);
+        let (net, places, streets) = assemble(map);
+        self.streets = Some(std::sync::Arc::new(streets));
+        self.global = Some(std::sync::Arc::new(net));
+        self.stop_pos = std::sync::Arc::new(places);
         self.global_version += 1;
     }
 
@@ -1311,6 +1301,34 @@ struct MapRoad {
     points: Vec<DVec3>,
     width: f32,
     main: bool,
+}
+
+/// The navigator's own copy of the whole map's network, ready to route and to draw: the
+/// lanes as the tiles gave them, joined, with the asphalt evidence applied and the street
+/// names carried along the roads. The worker (`start_map`) and the offscreen picture
+/// (`set_map`) both come through here, so a map is prepared the same way once, and the
+/// log shows what the wait for the whole map's roads is made of.
+fn assemble(map: crate::scene::NavigationMap) -> (Network, HashMap<i64, DVec3>, Streets) {
+    let t0 = std::time::Instant::now();
+    let mut net = Network { lanes: map.lanes, ..Default::default() };
+    net.link(1.5);
+    let joined = t0.elapsed().as_secs_f64();
+    confirm_road_surfaces(&mut net, &map.road_surfaces);
+    let asphalt = t0.elapsed().as_secs_f64();
+    probe_lanes(&net);
+    let streets = build_streets(&net, &map.signs);
+    let done = t0.elapsed().as_secs_f64();
+    log::info!(
+        "navigator map ready: {} lanes from {} asphalt surfaces, {} signs: joining {:.0} ms, asphalt {:.0} ms, streets {:.0} ms, {:.2} s in all",
+        net.lanes.len(),
+        map.road_surfaces.len(),
+        map.signs.len(),
+        joined * 1000.0,
+        (asphalt - joined) * 1000.0,
+        (done - asphalt) * 1000.0,
+        done
+    );
+    (net, map.places, streets)
 }
 
 /// Some maps separate the asphalt mesh from their editor-only traffic splines. Use the
@@ -2219,6 +2237,7 @@ impl Navigator {
         if let Some(n) = net {
             let version = self.global_version * 1_000_000 + n.lanes.len() as u64;
             if self.city.roads.map(|r| r.0 != version).unwrap_or(true) {
+                let t_roads = std::time::Instant::now();
                 let (mut lo, mut hi) = (DVec2::splat(f64::MAX), DVec2::splat(f64::MIN));
                 let road_lanes = road_geometry(n);
                 for l in &road_lanes {
@@ -2246,6 +2265,15 @@ impl Navigator {
                     }
                 }
                 self.city.roads = Some((version, p.len(), anchor));
+                if omsi_cfg::env::var_os("OMSI_DEBUG_NAV").is_some() {
+                    log::info!(
+                        "navigator: the whole map's roads in {:.0} ms: {} roads from {} lanes, {} vertices",
+                        t_roads.elapsed().as_secs_f64() * 1000.0,
+                        road_lanes.len(),
+                        n.lanes.len(),
+                        p.verts.len()
+                    );
+                }
                 roads_verts = Some(p.verts);
             }
         }

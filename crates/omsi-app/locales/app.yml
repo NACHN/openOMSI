@@ -2,6 +2,26 @@
 # language of a text under it. `pt` is Brazilian Portuguese; `pt-pt` is European Portuguese.
 _version: 2
 
+"Left click puts it on the ground · drag an arrow to slide it":
+  zh: "左键把它放到地面上 · 拖动箭头滑动"
+  zh-tw: "左鍵把它放到地面上 · 拖動箭頭滑動"
+
+"Left click turns it to face the crosshair · drag the ring to turn it":
+  zh: "左键让它转向准星 · 拖动圆环旋转"
+  zh-tw: "左鍵讓它轉向準星 · 拖動圓環旋轉"
+
+"move east":
+  zh: "向东移动"
+  zh-tw: "向東移動"
+
+"move north":
+  zh: "向北移动"
+  zh-tw: "向北移動"
+
+"move up":
+  zh: "向上移动"
+  zh-tw: "向上移動"
+
 "Steering view angle":
   de: "Blickwinkel beim Lenken"
   fr: "Angle de vue en braquant"
@@ -107,6 +127,14 @@ _version: 2
   tl: "Kanang signal (bukas/patay)"
   zh: "右转向灯（开启／关闭）"
   hi: "दायाँ संकेतक (चालू/बंद)"
+
+"the gizmo is holding:":
+  zh: "控制柄正在操作："
+  zh-tw: "控制柄正在操作："
+
+"turning":
+  zh: "旋转"
+  zh-tw: "旋轉"
 
 "Force feedback direction":
   de: "Force-Feedback-Richtung"
@@ -21579,3 +21607,226 @@ _version: 2
   id: "Penuh"
   ms: "Penuh"
   tl: "Buo"
+
+# ---- the editor's own panels (omsi-editor) -----------------------------------------------
+#
+# The map editor is a program of its own and its panels are the launcher's, so its texts are
+# translated the same way. Only Chinese so far: a language without an entry here falls back to
+# the English key, which is a missing translation rather than a wrong one.
+
+"A .openomsi-bak snapshot is kept beside each file it changes.":
+  zh: "每个被改动的文件旁会保留一份 .openomsi-bak 快照。"
+  zh-tw: "每個被更動的檔案旁會保留一份 .openomsi-bak 快照。"
+"A changed tile is written as a copy under":
+  zh: "改动过的瓦片会作为副本写入"
+  zh-tw: "變更過的瓦片會以副本寫入"
+"A changed tile is written over the map's own file.":
+  zh: "改动过的瓦片会覆盖地图自己的文件。"
+  zh-tw: "變更過的瓦片會覆寫地圖自己的檔案。"
+"A save writes copies under":
+  zh: "保存会把副本写入"
+  zh-tw: "儲存會把副本寫入"
+"A save writes the map's own files, with a .openomsi-bak snapshot each":
+  zh: "保存会写入地图自己的文件，每个文件各留一份 .openomsi-bak 快照"
+  zh-tw: "儲存會寫入地圖自己的檔案，每個檔案各留一份 .openomsi-bak 快照"
+"Choose something first.":
+  zh: "请先选中一个物体。"
+  zh-tw: "請先選中一個物件。"
+"Choose the object to copy first.":
+  zh: "请先选中要复制的物体。"
+  zh-tw: "請先選中要複製的物件。"
+"Chosen object":
+  zh: "选中的物体"
+  zh-tw: "選中的物件"
+"Click to write copies instead.":
+  zh: "单击可改为写入副本"
+  zh-tw: "單擊可改為寫入副本"
+"Click to write the map's own files instead.":
+  zh: "单击可改为写入地图自己的文件"
+  zh-tw: "單擊可改為寫入地圖自己的檔案"
+"Commands":
+  zh: "命令"
+  zh-tw: "指令"
+"Commands work here as they did in the terminal: help lists them.":
+  zh: "这里的命令和终端里一样：输入 help 查看列表。"
+  zh-tw: "這裡的指令和終端裡一樣：輸入 help 查看清單。"
+"Face aim":
+  zh: "朝向准星"
+  zh-tw: "朝向準星"
+"Flatten the ground":
+  zh: "整平地面"
+  zh-tw: "整平地面"
+"Fold the console away":
+  zh: "收起命令面板"
+  zh-tw: "收起指令面板"
+"How far an arrow key moves and turns - click to change":
+  zh: "方向键移动和旋转的步长 - 单击切换"
+  zh-tw: "方向鍵移動和旋轉的步長 - 單擊切換"
+"Left click chooses what the crosshair is on":
+  zh: "左键选中准星所指的物体"
+  zh-tw: "左鍵選中準星所指的物件"
+"Left click levels the ground to where the crosshair is":
+  zh: "左键把地面整平到准星所在的高度"
+  zh-tw: "左鍵把地面整平到準星所在的高度"
+"Left click puts a copy where the crosshair meets the ground":
+  zh: "左键在准星与地面的交点上放置副本"
+  zh-tw: "左鍵在準星與地面的交點上放置副本"
+"Left click raises the ground by the step · Shift lowers it":
+  zh: "左键按步长升高地面 · Shift 降低"
+  zh-tw: "左鍵按步長升高地面 · Shift 降低"
+"Left click takes away what the crosshair is on":
+  zh: "左键移除准星所指的物体"
+  zh-tw: "左鍵移除準星所指的物件"
+"Move":
+  zh: "移动"
+  zh-tw: "移動"
+"Move to aim":
+  zh: "移到准星处"
+  zh-tw: "移到準星處"
+"No changes yet":
+  zh: "尚无改动"
+  zh-tw: "尚無變更"
+"Nothing to do again":
+  zh: "没有可重做的操作"
+  zh-tw: "沒有可重做的操作"
+"Nothing to take back":
+  zh: "没有可撤销的操作"
+  zh-tw: "沒有可復原的操作"
+"Nothing under the crosshair.":
+  zh: "准星下没有物体。"
+  zh-tw: "準星下沒有物件。"
+"Open the console":
+  zh: "展开命令面板"
+  zh-tw: "展開指令面板"
+"Place a copy":
+  zh: "放置副本"
+  zh-tw: "放置副本"
+"Point at something and click, or type `sel <id>` below.":
+  zh: "指向某个物体并单击，或在下方输入 `sel <id>`。"
+  zh-tw: "指向某個物件並單擊，或在下方輸入 `sel <id>`。"
+"Put back":
+  zh: "放回"
+  zh-tw: "放回"
+"Put it back as it was":
+  zh: "恢复原样"
+  zh-tw: "還原原樣"
+"Raise the ground":
+  zh: "升高地面"
+  zh-tw: "升高地面"
+"Save or take the changes back before writing somewhere else.":
+  zh: "请先保存或撤销改动，再更换写入位置。"
+  zh-tw: "請先儲存或復原變更，再更換寫入位置。"
+"Select":
+  zh: "选择"
+  zh-tw: "選擇"
+"Take away":
+  zh: "移除"
+  zh-tw: "移除"
+"The crosshair is not on any ground.":
+  zh: "准星没有落在地面上。"
+  zh-tw: "準星沒有落在地面上。"
+"The game reads that copy before the original map, which is never touched.":
+  zh: "游戏会先读取这份副本，原地图文件不会被改动。"
+  zh-tw: "遊戲會先讀取這份副本，原地圖檔案不會被更動。"
+"The ground brush's radius - click to change it":
+  zh: "地面笔刷的半径 - 单击切换"
+  zh-tw: "地面筆刷的半徑 - 單擊切換"
+"The map is flown with W A S D, Q and E, the right button turns the view.":
+  zh: "用 W A S D、Q E 飞行，按住鼠标右键转动视角。"
+  zh-tw: "用 W A S D、Q E 飛行，按住滑鼠右鍵轉動視角。"
+"Turn":
+  zh: "旋转"
+  zh-tw: "旋轉"
+"Variant":
+  zh: "变体"
+  zh-tw: "變體"
+"Writes copies":
+  zh: "写入副本"
+  zh-tw: "寫入副本"
+"Writes the map":
+  zh: "写入地图本体"
+  zh-tw: "寫入地圖本體"
+"brush":
+  zh: "笔刷"
+  zh-tw: "筆刷"
+"camera":
+  zh: "视角"
+  zh-tw: "視角"
+"could not open the map again":
+  zh: "无法重新打开地图"
+  zh-tw: "無法重新開啟地圖"
+"could not save":
+  zh: "无法保存"
+  zh-tw: "無法儲存"
+"crosshair":
+  zh: "准星"
+  zh-tw: "準星"
+"crosshair is not on the ground":
+  zh: "准星没有落在地面上"
+  zh-tw: "準星沒有落在地面上"
+"heading":
+  zh: "朝向"
+  zh-tw: "朝向"
+"objects":
+  zh: "个物体"
+  zh-tw: "個物件"
+"position":
+  zh: "位置"
+  zh-tw: "位置"
+"step":
+  zh: "步长"
+  zh-tw: "步長"
+"taken away":
+  zh: "已移除"
+  zh-tw: "已移除"
+"tile":
+  zh: "瓦片"
+  zh-tw: "瓦片"
+"tiles":
+  zh: "个瓦片"
+  zh-tw: "個瓦片"
+"tiles loaded":
+  zh: "个瓦片已载入"
+  zh-tw: "個瓦片已載入"
+"tiles not written":
+  zh: "个瓦片未写入"
+  zh-tw: "個瓦片未寫入"
+"turn":
+  zh: "转角"
+  zh-tw: "轉角"
+
+# ---- the editor's start page -------------------------------------------------------------
+
+"Edit an OMSI 2 map":
+  zh: "编辑 OMSI 2 地图"
+  zh-tw: "編輯 OMSI 2 地圖"
+"Edit this map":
+  zh: "编辑这张地图"
+  zh-tw: "編輯這張地圖"
+"No map was found: nothing with a `global.cfg` is under the folders below.":
+  zh: "没有找到地图：下面的文件夹里没有含 global.cfg 的目录。"
+  zh-tw: "沒有找到地圖：下面的資料夾裡沒有含 global.cfg 的目錄。"
+"Reading":
+  zh: "读取"
+  zh-tw: "讀取"
+"Which map?":
+  zh: "选择要编辑的地图"
+  zh-tw: "選擇要編輯的地圖"
+"could not open the map":
+  zh: "无法打开地图"
+  zh-tw: "無法開啟地圖"
+"in the content folder":
+  zh: "在 content 中"
+  zh-tw: "在 content 中"
+"in the installation":
+  zh: "在原版安装中"
+  zh-tw: "在原版安裝中"
+"the installation":
+  zh: "原版安装"
+  zh-tw: "原版安裝"
+"the installation (no content folder is known)":
+  zh: "原版安装（未找到 content 文件夹）"
+  zh-tw: "原版安裝（未找到 content 資料夾）"
+"the map's own files":
+  zh: "地图自己的文件，各留一份 .openomsi-bak 快照"
+  zh-tw: "地圖自己的檔案，各留一份 .openomsi-bak 快照"

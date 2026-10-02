@@ -17,9 +17,11 @@ mod showroom;
 mod state;
 #[cfg_attr(not(target_os = "android"), allow(unused_imports))]
 pub(crate) use state::crash_of;
-mod theme;
+// the look and the widgets: the editor draws its own interface with these, so the three
+// programs share one toolkit rather than growing three (see `host::ui`)
+pub(crate) mod theme;
 mod timetable;
-mod ui;
+pub(crate) mod ui;
 mod update;
 
 use glam::Vec2;

@@ -1,0 +1,35 @@
+[package]
+name = "omsi-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The openOMSI map editor"
+
+[[bin]]
+name = "openomsi-editor"
+path = "src/main.rs"
+
+[dependencies]
+# the editing itself: no window, no GPU, no opinions about a screen
+omsi-editor-core = { path = "../omsi-editor-core" }
+omsi-cfg = { path = "../omsi-cfg" }
+omsi-map = { path = "../omsi-map" }
+omsi-launcher-core = { path = "../omsi-launcher-core" }
+# the map as the game draws it. This is the one dependency the editor has on the game, and
+# `omsi_app::host` is the only door it goes through: the editor is its own program, but a
+# tile has to look in it exactly as it looks in the game.
+omsi-app = { path = "../omsi-app" }
+omsi-render = { path = "../omsi-render" }
+# the widgets and the palette the other two programs are drawn with: the editor's own panels
+# come from the same module (see `openomsi_game::host::ui`), not from a toolkit of its own
+omsi-ui = { path = "../omsi-ui" }
+wgpu.workspace = true
+winit.workspace = true
+pollster.workspace = true
+glam.workspace = true
+hashbrown.workspace = true
+image.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true

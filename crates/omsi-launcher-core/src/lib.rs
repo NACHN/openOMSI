@@ -254,24 +254,69 @@ fn root() -> Result<PathBuf> {
 /// The game's own content folder: the folder of the game binary, laid out like OMSI 2
 /// (Vehicles, maps, Sceneryobjects ...). Installed mods live here; the game searches it
 /// before the original installation.
+///
+/// This answers for the program that asks - a game beside *this* binary comes first, which is
+/// right for the launcher and for the game, which are shipped with one. A program that ships
+/// with no game wants [`player_content_dir`] instead.
 pub fn content_dir() -> Option<PathBuf> {
     // the same rules as the game: $OMSI_CONTENT, else the folder of the game binary (beside
     // the bundle when the binary sits inside a macOS .app)
-    let dir = match std::env::var_os("OMSI_CONTENT") {
-        Some(d) => PathBuf::from(d),
-        None => {
-            let c = load_config_raw();
-            let game = find_game(&c.game)?;
-            let dir = game.parent()?.to_path_buf();
-            let beside = if dir.ends_with("Contents/MacOS") { dir.parent()?.parent()?.parent()?.to_path_buf() } else { dir };
-            let cand = omsi_cfg::content_folder_of(&beside);
-            if (cand.exists() || std::fs::create_dir_all(&cand).is_ok()) && omsi_cfg::is_writable(&cand) {
-                cand
-            } else {
-                data_dir().join("content")
-            }
-        }
-    };
+    if let Some(d) = content_from_env() {
+        return adopt_content(d);
+    }
+    let game = find_game(&load_config_raw().game)?;
+    adopt_content(content_beside(&game)?)
+}
+
+/// The content folder of the game the launcher is set up to start: where the launcher installs
+/// mods and where that game reads them.
+///
+/// [`content_dir`] answers for whatever game sits beside the asking program. The editor is a
+/// third program that ships with no game at all, so asked from a build folder it would answer
+/// that build folder: it would open stock maps and nothing else, and a map, object or texture
+/// that came with a mod would not be there. This asks for the game written down in the
+/// launcher's own settings instead, whatever this program's folder happens to be.
+pub fn player_content_dir() -> Option<PathBuf> {
+    if let Some(d) = content_from_env() {
+        return adopt_content(d);
+    }
+    let game = configured_game().or_else(|| find_game(&load_config_raw().game))?;
+    adopt_content(content_beside(&game)?)
+}
+
+/// `$OMSI_CONTENT`: a content folder a program was pointed at, which overrides every other
+/// rule (the game's own startup reads the same variable).
+fn content_from_env() -> Option<PathBuf> {
+    std::env::var_os("OMSI_CONTENT").map(PathBuf::from)
+}
+
+/// The game the launcher is set up to start, exactly as it is written down - worked out
+/// without looking beside the program that is asking.
+fn configured_game() -> Option<PathBuf> {
+    let c: Config = std::fs::read_to_string(config_path()).ok().and_then(|t| serde_json::from_str(&t).ok())?;
+    let g = PathBuf::from(c.game.trim());
+    g.is_file().then_some(g)
+}
+
+/// The content folder that belongs to the game at `game`: the folder it sits in, laid out like
+/// OMSI 2 (the bundle's folder when the binary is inside a macOS `.app`), or the user's own
+/// `~/.openomsi/content` when that folder cannot be written to.
+fn content_beside(game: &Path) -> Option<PathBuf> {
+    let dir = game.parent()?.to_path_buf();
+    let beside = if dir.ends_with("Contents/MacOS") { dir.parent()?.parent()?.parent()?.to_path_buf() } else { dir };
+    let cand = omsi_cfg::content_folder_of(&beside);
+    Some(if (cand.exists() || std::fs::create_dir_all(&cand).is_ok()) && omsi_cfg::is_writable(&cand) {
+        cand
+    } else {
+        data_dir().join("content")
+    })
+}
+
+/// Take `dir` as the content folder: lay it out, and tell the OMSI readers about it, the
+/// archives kept in its `Archives` folder and the OMSI folder - in that order, as the game has
+/// them. A program that only computes the folder and does not do this reads the original
+/// installation and nothing else.
+fn adopt_content(dir: PathBuf) -> Option<PathBuf> {
     let _ = omsi_cfg::ensure_content_layout(&dir);
     register_roots(&dir);
     Some(dir)
@@ -2890,6 +2935,31 @@ mod tests {
         assert!(text.contains("\nview_distance=900\n") && text.contains("\ntexture_memory=1500\n"), "{text}");
         #[cfg(unix)]
         assert!(physical_memory().unwrap_or(0) > 256_000_000, "the machine's memory is read");
+    }
+
+    /// The folder the game sits in decides where its content is - and unpacked into an OMSI 2
+    /// installation, openOMSI keeps its content apart from the original's own files.
+    ///
+    /// (two folders rather than one: the readers list a folder once and remember it, so adding
+    /// `Omsi.exe` to a folder that has already been looked at would not be seen)
+    #[test]
+    fn a_game_lets_its_own_folder_decide_where_its_content_is() {
+        let base = std::env::temp_dir().join(format!("openomsi-content-beside-{}", std::process::id()));
+        let plain = base.join("plain");
+        let in_omsi = base.join("in-omsi");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(in_omsi.join("maps")).unwrap();
+        std::fs::write(plain.join("openomsi.exe"), b"").unwrap();
+        std::fs::write(in_omsi.join("openomsi.exe"), b"").unwrap();
+        std::fs::write(in_omsi.join("Omsi.exe"), b"").unwrap();
+
+        // a folder of its own: the content folder is that folder
+        assert_eq!(super::content_beside(&plain.join("openomsi.exe")).unwrap(), plain);
+        // inside the original game's folder - an `Omsi.exe` and a `maps` folder make one -
+        // openOMSI writes into an `openOMSI` folder of its own rather than among OMSI's files
+        assert_eq!(super::content_beside(&in_omsi.join("openomsi.exe")).unwrap(), in_omsi.join("openOMSI"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 

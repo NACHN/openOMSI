@@ -6,9 +6,14 @@ mod puddles;
 
 use anyhow::{anyhow, Context, Result};
 use glam::{DVec3, Mat4, Vec3, Vec4};
-use omsi_geometry::MeshData;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// The triangle mesh [`Renderer::add_mesh`] takes. Re-exported because building one is the
+/// caller's job: a program that draws something of its own over the map - the editor's
+/// selection bubble, its gizmo - has to speak this type, and reaching into `omsi-geometry`
+/// for it would make the geometry crate a dependency of every such program.
+pub use omsi_geometry::MeshData;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

@@ -11,6 +11,10 @@
 
 mod admin;
 mod discord;
+/// What a *second* program built on this library can use: the same world and the same tiles,
+/// without the game around them. `openomsi-editor` is that program; see the module's own
+/// documentation for why the editor shares this rather than drawing a map its own way.
+pub mod host;
 mod headtrack;
 #[cfg(windows)]
 mod openxr;

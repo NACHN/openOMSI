@@ -3214,6 +3214,7 @@ dependencies = [
  "omsi-audio",
  "omsi-cfg",
  "omsi-content",
+ "omsi-editor-core",
  "omsi-geometry",
  "omsi-launcher-core",
  "omsi-map",
@@ -3311,6 +3312,41 @@ dependencies = [
 [[package]]
 name = "omsi-demo-plugin"
 version = "0.1.0"
+
+[[package]]
+name = "omsi-editor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "glam",
+ "hashbrown 0.15.5",
+ "image",
+ "log",
+ "omsi-app",
+ "omsi-cfg",
+ "omsi-editor-core",
+ "omsi-launcher-core",
+ "omsi-map",
+ "omsi-render",
+ "omsi-ui",
+ "pollster",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "omsi-editor-core"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "hashbrown 0.15.5",
+ "log",
+ "omsi-cfg",
+ "omsi-map",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "omsi-geometry"

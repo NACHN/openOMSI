@@ -22,6 +22,8 @@ winresource = "0.1"
 [dependencies]
 omsi-cfg = { path = "../omsi-cfg" }
 omsi-map = { path = "../omsi-map" }
+# the editing kernel the in-game editor and the standalone `openomsi-editor` both drive
+omsi-editor-core = { path = "../omsi-editor-core" }
 omsi-scenery = { path = "../omsi-scenery" }
 omsi-model = { path = "../omsi-model" }
 omsi-o3d = { path = "../omsi-o3d" }
