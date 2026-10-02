@@ -2867,10 +2867,11 @@ pub const SHADOW_LIFT: f32 = 0.02;
 /// blob's plane (m): a kerb or a ramp, the step the AI's wheels climb
 /// (`ai_motion::AI_STEP_UP`).
 const SHADOW_STEP_UP: f64 = 0.6;
-/// How far under it (m). Loose: the model's origin plane is the contact plane of the
-/// *unloaded* springs, so a body at rest stands its ground 10-16 cm below its own plane,
-/// and a map may put a vehicle down a little over its road. Farther down is another level -
-/// a road under a bridge - and not the face this wheel stands on.
+/// How far under the wheel's own plane the face it stands on may lie (m). Loose: the
+/// model's origin plane is the contact plane of the *unloaded* springs, so a body at rest
+/// stands its ground 10-16 cm below its own plane, and a map may put a vehicle down a little
+/// over its road. Farther down is another level - a road under a bridge - and not the face
+/// this wheel stands on.
 const SHADOW_STEP_DOWN: f64 = 3.0;
 
 /// How strong the film on the glass gets in the thickest snowfall (`Rain_Window_*_Wetness`,
@@ -2888,23 +2889,29 @@ fn is_shadow_mesh(ty: &VehicleType, i: usize) -> bool {
 /// level-limited probe the AI bodies ask (`ai_motion::AiBody::settle`). The plain height
 /// sampler knows only x and y and gives the *highest* face, so a vehicle under a bridge or a
 /// canopy had its `[isshadow]` blob laid onto the deck over it (the same sampler lifted the
-/// coupled parts onto the bridge, #140). The plain sampler stays the fallback where the
-/// tiles put no road face near the wheel.
+/// coupled parts onto the bridge, #140). Either source is taken only where it lies at the
+/// wheel's own level; a wheel whose ground is another level's - or none the world knows -
+/// adds no point, so the blob stays on the vehicle's own plane, as OMSI draws it, rather
+/// than on the deck above.
 fn wheel_ground(
     contact: Option<&dyn crate::rigid::Ground>,
     ground: Option<&(dyn Fn(f64, f64) -> Option<f64> + Send + Sync)>,
     p: DVec3,
 ) -> Option<f64> {
+    let at_the_wheels_level = |z: f64| (p.z - SHADOW_STEP_DOWN..=p.z + SHADOW_STEP_UP).contains(&z);
     if let Some(c) = contact {
         if let Some(g) = c
             .probe(p.x, p.y, p.z + SHADOW_STEP_UP)
             .below
-            .filter(|g| *g >= p.z - SHADOW_STEP_DOWN)
+            .filter(|g| at_the_wheels_level(*g))
         {
             return Some(g);
         }
     }
-    ground.and_then(|g| g(p.x, p.y))
+    // (the plain sampler is all there is where the world has no face probe at all - a rail
+    // or air lane; and it is the only source for a wheel whose ground the drive grid does
+    // not carry, the floor of an excavation the terrain is cut away over among them)
+    ground.and_then(|g| g(p.x, p.y)).filter(|z| at_the_wheels_level(*z))
 }
 
 /// Body frame → body frame with the plane z = 0 laid onto z = p[0] + p[1]·x + p[2]·y
@@ -3749,8 +3756,9 @@ mod tests {
     /// The wheel of a body without a rigid body stands on the road the drawn faces put
     /// under it, not on the deck of a bridge over that road (or a canopy above it): the
     /// plain sampler knows only x and y and gives the highest face there, which laid the
-    /// `[isshadow]` blob up on the deck. Where the faces put nothing near the wheel - and
-    /// where there is no face probe at all - the plain sampler still answers.
+    /// `[isshadow]` blob up on the deck. Where no source has a face at the wheel's own
+    /// level, the wheel adds nothing - the blob stays on the vehicle's own plane, as OMSI
+    /// draws it, rather than up on the deck.
     #[test]
     fn a_wheels_ground_is_the_road_under_it_not_the_highest_face() {
         let (road, deck) = (12.0f64, 17.0f64);
@@ -3767,12 +3775,19 @@ mod tests {
         assert_eq!(wheel_ground(Some(faces), Some(plain), wheel), Some(road));
         // a wheel standing on the deck itself gets the deck
         assert_eq!(wheel_ground(Some(faces), Some(plain), DVec3::new(100.0, 200.0, deck)), Some(deck));
-        // nothing drawn within a step of the wheel: the plain sampler, as before
+        // the prober knows the faces here and has none at the wheel's level (a wheel over an
+        // excavation): the plain sampler's deck is another level's and is not taken - the
+        // wheel adds no point
         let empty = |_x: f64, _y: f64, _top: f64| crate::rigid::GroundProbe { below: None, above: Some(deck) };
         let empty: &dyn crate::rigid::Ground = &empty;
-        assert_eq!(wheel_ground(Some(empty), Some(plain), wheel), Some(deck));
-        // no face probe at all (a rail or air lane): the plain sampler
-        assert_eq!(wheel_ground(None, Some(plain), wheel), Some(deck));
+        assert_eq!(wheel_ground(Some(empty), Some(plain), wheel), None);
+        // no face probe at all (a rail or air lane): the plain sampler answers, but only
+        // where it lies at the wheel's level
+        assert_eq!(wheel_ground(None, Some(plain), DVec3::new(100.0, 200.0, deck)), Some(deck));
+        assert_eq!(wheel_ground(None, Some(plain), wheel), None);
+        // a face just under the wheel's own plane (the springs' sag, a map a little high)
+        let sagged = DVec3::new(100.0, 200.0, road + 0.15);
+        assert_eq!(wheel_ground(Some(faces), Some(plain), sagged), Some(road));
     }
 
     /// The resolved property plan gives what `compute_mesh_props` gives, for a stock bus
