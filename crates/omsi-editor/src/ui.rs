@@ -19,6 +19,7 @@
 //! is no spline tool while splines cannot be edited.
 
 use crate::repl;
+use crate::start;
 use crate::view::View;
 use glam::{DVec3, Vec2};
 use omsi_editor_core::{Destination, Session};
@@ -155,6 +156,9 @@ pub struct MapEntry {
     pub from_content: bool,
 }
 
+/// A vehicle the first page lists; see `crate::start::VehicleEntry`.
+pub use crate::start::VehicleEntry;
+
 /// What the start page says about the run, besides the maps: where they come from and where
 /// a save would go. Both are read from the same places the terminal banner reads them.
 pub struct Start<'a> {
@@ -192,12 +196,15 @@ pub struct Panels {
     /// it reads this and closes (`window::Editor::about_to_wait`).
     pub quit: bool,
 
-    /// The start page: every map there is to open, and which of them is highlighted. The
-    /// window shows this page until a session is open, so a double click never lands in a
-    /// terminal asking which map to edit.
+    /// The first page: which of the three things the rail offers is open, and what is
+    /// highlighted in the list that page shows (`crate::start` draws it).
+    page: start::State,
+    /// Every map the first page offers. The window shows this page until a session is open,
+    /// so a double click never lands in a terminal asking which map to edit.
     pub maps: Vec<MapEntry>,
-    start_choice: usize,
-    /// A map the start page was asked to open. The window reads it, opens the session on it
+    /// The vehicles under `Vehicles` in the two folders - what the vehicle page lists.
+    pub vehicles: Vec<start::VehicleEntry>,
+    /// A map the first page was asked to open. The window reads it, opens the session on it
     /// and draws the editing panels from then on.
     pub open_map: Option<std::path::PathBuf>,
 }
@@ -227,31 +234,57 @@ impl Panels {
             reopen: None,
             clicked_map: false,
             quit: false,
+            page: start::State::default(),
             maps: Vec::new(),
-            start_choice: 0,
+            vehicles: Vec::new(),
             open_map: None,
         }
     }
 
-    /// The maps the start page offers, and the one already highlighted.
+    /// The maps the first page offers. The map editor's page is the one it opens on, so the
+    /// highlight starts at the top of the list.
     pub fn set_maps(&mut self, maps: Vec<MapEntry>) {
         self.maps = maps;
-        self.start_choice = 0;
+        self.page.map_choice = 0;
     }
 
-    /// Move the highlight up or down the map list - the arrow keys on the start page.
+    /// The vehicles the vehicle page lists.
+    pub fn set_vehicles(&mut self, vehicles: Vec<start::VehicleEntry>) {
+        self.vehicles = vehicles;
+        self.page.vehicle_choice = 0;
+    }
+
+    /// Set by the Maps page's "New map"; the window reads it and makes the map (or says that
+    /// making one is not written yet).
+    pub fn take_new_map(&mut self) -> bool {
+        std::mem::take(&mut self.page.new_map)
+    }
+
+    /// Open one of the first page's three sections, as a click on the rail would - what
+    /// `--ui-section` sets, so that a page can be looked at without clicking through to it.
+    pub fn show_section(&mut self, section: start::Section) {
+        self.page.section = section;
+    }
+
+    /// Move the highlight up or down the list the open page is showing - the arrow keys on
+    /// the first page.
     pub fn choose(&mut self, step: i32) {
-        if self.maps.is_empty() {
+        let (len, choice) = match self.page.section {
+            // the test track is not a list to walk
+            start::Section::Testing => return,
+            start::Section::Vehicles => (self.vehicles.len(), &mut self.page.vehicle_choice),
+            start::Section::Maps => (self.maps.len(), &mut self.page.map_choice),
+        };
+        if len == 0 {
             return;
         }
-        let n = self.maps.len() as i32;
-        self.start_choice = (self.start_choice as i32 + step).rem_euclid(n) as usize;
+        *choice = (*choice as i32 + step).rem_euclid(len as i32) as usize;
     }
 
-    /// Open the highlighted map: what Enter does on the start page, and what a second click
+    /// Open the highlighted map: what Enter does on the first page, and what a second click
     /// on an already-highlighted row does.
     pub fn open_chosen(&mut self) {
-        if let Some(m) = self.maps.get(self.start_choice) {
+        if let Some(m) = self.maps.get(self.page.map_choice) {
             self.open_map = Some(m.cfg.clone());
         }
     }
@@ -353,7 +386,31 @@ impl Panels {
         let w = size.0 as f32 / scale;
         let h = size.1 as f32 / scale;
         self.ui.begin(Vec2::new(w, h), scale, dt);
-        self.start_page(start, w, h);
+        // the fields are taken apart so that the toolkit and the lists it draws can be
+        // borrowed at the same time - the page reads them both
+        let mut open = None;
+        let mut quit = false;
+        {
+            let Panels { ui, page, maps, vehicles, .. } = self;
+            let data = crate::start::Data {
+                root: start.root,
+                content: start.content,
+                destination: start.destination,
+                maps,
+                vehicles,
+            };
+            match crate::start::draw(ui, page, &data, w, h) {
+                crate::start::Action::None => {}
+                crate::start::Action::Open(i) => open = maps.get(i).map(|m| m.cfg.clone()),
+                crate::start::Action::Quit => quit = true,
+            }
+        }
+        if let Some(cfg) = open {
+            self.open_map = Some(cfg);
+        }
+        if quit {
+            self.quit = true;
+        }
         // there is no map behind this page, so there is no map click either
         self.clicked_map = false;
         self.upload(renderer)
@@ -396,129 +453,6 @@ impl Panels {
     }
 
     // ---- the panels ---------------------------------------------------------------------
-
-    /// The page there is before a map is open.
-    fn start_page(&mut self, start: &Start, w: f32, h: f32) {
-        // the whole window is interface here: there is no map behind it
-        self.ui.p().rect(Rect::new(0.0, 0.0, w, h), RAIL);
-        self.ui.solid(Rect::new(0.0, 0.0, w, h));
-
-        // the same bar the editing pages carry, so the two read as one program
-        let top = Rect::new(0.0, 0.0, w, TOP_H);
-        self.ui.p().rect(Rect::new(0.0, TOP_H - 1.0, w, 1.0), EDGE);
-        let name = "openOMSI editor";
-        self.ui.text_in(name, Rect::new(16.0, 0.0, 400.0, TOP_H), 14.0, Weight::Bold, TEXT, Align::Left);
-        let named = self.ui.width(name, 14.0, Weight::Bold);
-        self.ui.text_in("Edit an OMSI 2 map", Rect::new(16.0 + named + 12.0, 0.0, 400.0, TOP_H), 11.5, Weight::Regular, TEXT_FAINT, Align::Left);
-        let quit = Rect::new(top.right() - 16.0 - 88.0, top.center().y - 15.0, 88.0, 30.0);
-        if self.ui.button("start-quit", quit, "Quit", None, ButtonKind::Ghost) {
-            self.quit = true;
-        }
-
-        // the card: the map list, and what is known about the run along the bottom of it
-        let card_w = 760.0_f32.min(w - 64.0).max(320.0);
-        let card_h = (h - TOP_H - 72.0).max(180.0);
-        let card = Rect::new((w - card_w) * 0.5, TOP_H + 24.0, card_w, card_h);
-        self.ui.panel(card);
-        let inner = Rect::new(card.x + 20.0, card.y + 20.0, card.w - 40.0, card.h - 40.0);
-
-        let head = self.ui.heading(Rect::new(inner.x, inner.y, inner.w, 26.0), "Which map?", None);
-        let count = format!("{}", self.maps.len());
-        self.ui.text_in(&count, Rect::new(inner.right() - 60.0, head.y - 26.0, 60.0, 26.0), 12.0, Weight::Bold, TEXT_FAINT, Align::Right);
-
-        let footer = Rect::new(inner.x, inner.bottom() - 70.0, inner.w, 70.0);
-        let list = Rect::new(inner.x, inner.y + 32.0, inner.w, (footer.y - 12.0) - (inner.y + 32.0));
-
-        if self.maps.is_empty() {
-            self.ui.paragraph(
-                &tr("No map was found: nothing with a `global.cfg` is under the folders below."),
-                Vec2::new(list.x, list.y + 8.0),
-                list.w,
-                12.5,
-                Weight::Regular,
-                TEXT_DIM,
-            );
-        } else {
-            // the rows are drawn through the toolkit's own list: it scrolls, it remembers
-            // where it was, and a row hovers the way a row of the launcher's pages does
-            let rows: Vec<(String, String, bool)> =
-                self.maps.iter().map(|m| (m.name.clone(), m.cfg.to_string_lossy().to_string(), m.from_content)).collect();
-            let mut chosen = self.start_choice;
-            let mut picked: Option<usize> = None;
-            let mut opened: Option<usize> = None;
-            self.ui.scroll_area("start-list", list, &mut |ui, r| {
-                let row_h = 34.0;
-                let mut y = r.y;
-                for (i, (name, cfg, from_content)) in rows.iter().enumerate() {
-                    let row = Rect::new(r.x, y, r.w, row_h);
-                    if row.bottom() > r.y - row_h && row.y < r.bottom() + row_h {
-                        if ui.row(&format!("start-row{i}"), row, chosen == i) {
-                            // the first click chooses, the second opens - the same as the
-                            // launcher's lists, where a click never does two things at once
-                            if chosen == i {
-                                opened = Some(i);
-                            } else {
-                                chosen = i;
-                                picked = Some(i);
-                            }
-                        }
-                        let tag = 150.0;
-                        ui.text_in(name, Rect::new(row.x + 12.0, row.y, row.w - tag - 20.0, row_h), 13.0, Weight::Medium, TEXT, Align::Left);
-                        // where this copy of the map is: the content folder wins over the
-                        // installation, and which one it came from is what a save touches
-                        let (from, colour) = if *from_content {
-                            ("in the content folder", ACCENT_2)
-                        } else {
-                            ("in the installation", TEXT_FAINT)
-                        };
-                        ui.text_in(from, Rect::new(row.right() - tag, row.y, tag - 8.0, row_h), 10.5, Weight::Bold, colour, Align::Right);
-                        ui.tooltip(row, cfg);
-                    }
-                    y += row_h;
-                }
-                y - r.y
-            });
-            if let Some(i) = picked {
-                self.start_choice = i;
-                self.ui.scroll_to("start-list", i as f32 * 34.0, 34.0, list.h);
-            }
-            if let Some(i) = opened {
-                self.start_choice = i;
-                self.open_chosen();
-            }
-        }
-
-        // what the list cannot say: where the maps are read from, and where a save writes.
-        // The panel's own fields, because these are the two answers that decide what a click
-        // on a row will touch
-        self.ui.p().rect(Rect::new(footer.x, footer.y, footer.w, 1.0), EDGE);
-        let label = 100.0;
-        let value_w = (footer.w - label - 140.0).max(80.0);
-        let row = |this: &mut Self, y: f32, name: &str, value: &str, c: Color| {
-            this.ui.text_in(name, Rect::new(footer.x, y, label, 20.0), 11.5, Weight::Bold, TEXT_DIM, Align::Left);
-            this.ui.text_in(value, Rect::new(footer.x + label, y, value_w, 20.0), 11.5, Weight::Regular, c, Align::Left);
-        };
-        row(self, footer.y + 8.0, "OMSI 2", &start.root.to_string_lossy(), TEXT_SOFT);
-        let reading = match start.content {
-            Some(c) => format!("{} → {}", c.display(), tr("the installation")),
-            None => tr("the installation (no content folder is known)").to_string(),
-        };
-        row(self, footer.y + 28.0, "Reading", &reading, TEXT_FAINT);
-        // the mode is the label and the path is the value, so the line does not say "writes
-        // copies" twice over
-        let (label, writing) = match start.destination {
-            Destination::Content(p) => (tr("Writes copies"), p.display().to_string()),
-            Destination::InPlace => (tr("Writes the map"), tr("the map's own files").to_string()),
-        };
-        row(self, footer.y + 48.0, &label, &writing, TEXT_FAINT);
-
-        // the button the list knows nothing about: it acts on what is highlighted
-        let open = Rect::new(footer.right() - 124.0, footer.y + 24.0, 124.0, 32.0);
-        let kind = if self.maps.is_empty() { ButtonKind::Ghost } else { ButtonKind::Primary };
-        if self.ui.button("start-open", open, "Edit this map", None, kind) && !self.maps.is_empty() {
-            self.open_chosen();
-        }
-    }
 
     fn layout(&mut self, session: &mut Session, view: &View, info: &Info, w: f32, h: f32) {
         let top = Rect::new(0.0, 0.0, w, TOP_H);

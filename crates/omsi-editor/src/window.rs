@@ -155,6 +155,7 @@ pub fn run(root: &Path, map_cfg: Option<PathBuf>, destination: Destination) -> R
     // the page's list, read before the window is opened so the first frame has it
     if editor.session.is_none() {
         editor.panels.set_maps(crate::map_entries(root));
+        editor.panels.set_vehicles(crate::vehicle_entries());
     }
     event_loop.run_app(&mut editor)?;
     // the window is gone, but an unwritten change is not: this is the last place to say so
@@ -617,7 +618,18 @@ impl Editor {
         self.panels.act(session, f);
     }
 
-    /// The start page asked for a map: open it, and the start page is over.
+    /// The Maps page asked for a map that is not there yet.
+    ///
+    /// Making one is the one thing the page can ask for that the core cannot do: a new map is
+    /// a folder of its own with a `global.cfg`, a tile list and the terrain under it, and none
+    /// of that is written. It says so rather than opening nothing.
+    fn make_a_map(&mut self) {
+        if self.panels.take_new_map() {
+            self.panels.say(host::ui::tr("Making a new map is not written yet.").to_string());
+        }
+    }
+
+    /// The first page asked for a map: open it, and the page is over.
     fn open_the_chosen_map(&mut self) {
         let Some(cfg) = self.panels.open_map.take() else { return };
         self.open_map(&cfg);
@@ -887,6 +899,7 @@ impl ApplicationHandler for Editor {
                     self.click_map();
                 }
                 self.open_the_chosen_map();
+                self.make_a_map();
                 self.reopen();
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();

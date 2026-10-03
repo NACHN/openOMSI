@@ -21830,3 +21830,84 @@ _version: 2
 "the map's own files":
   zh: "地图自己的文件，各留一份 .openomsi-bak 快照"
   zh-tw: "地圖自己的檔案，各留一份 .openomsi-bak 快照"
+
+# ---- the editor's first page: maps, vehicles and a test track ---------------------------
+#
+# The rail's three sections, and what each of the pages says. Same rule as the block
+# above: Chinese only, and a language with no entry falls back to the English key.
+"Maps":
+  zh: "地图"
+  zh-tw: "地圖"
+
+"Testing Area":
+  zh: "沙盘测试场"
+  zh-tw: "沙盤測試場"
+
+"Writing":
+  zh: "写入"
+  zh-tw: "寫入"
+
+"New map":
+  zh: "新建地图"
+  zh-tw: "新建地圖"
+
+"This map":
+  zh: "这张地图"
+  zh-tw: "這張地圖"
+
+"No map chosen":
+  zh: "未选择地图"
+  zh-tw: "未選擇地圖"
+
+"copies under":
+  zh: "副本写入"
+  zh-tw: "副本寫入"
+
+"Build a map, or change one that is already there":
+  zh: "从零建一张地图，或者改一张已有的"
+  zh-tw: "從零建一張地圖，或者改一張已有的"
+
+"A vehicle's own files: its model, its scripts, its sounds":
+  zh: "车辆自己的文件：模型、脚本、声音"
+  zh-tw: "車輛自己的檔案：模型、指令碼、聲音"
+
+"Drive a vehicle, or watch an object, on a track of your own":
+  zh: "在自己搭的场地上开车，或者盯着一个景物看"
+  zh-tw: "在自己搭的場地上開車，或者盯著一個景物看"
+
+"Its roads and its entry points are drawn here once a map is chosen.":
+  zh: "选中一张地图后，这里会画出它的路网和入口点。"
+  zh-tw: "選中一張地圖後，這裡會畫出它的路網和入口點。"
+
+"No vehicle was found: nothing is under `Vehicles` in either folder.":
+  zh: "没有找到车辆：两个文件夹的 Vehicles 下都是空的。"
+  zh-tw: "沒有找到車輛：兩個資料夾的 Vehicles 下都是空的。"
+
+"A vehicle cannot be changed from here yet: this page is where its model, its scripts and its sounds will be opened.":
+  zh: "目前还不能从这里改车辆：以后这一页会用来打开它的模型、脚本和声音。"
+  zh-tw: "目前還不能從這裡改車輛：以後這一頁會用來開啟它的模型、指令碼和聲音。"
+
+"Test a vehicle":
+  zh: "测试车辆"
+  zh-tw: "測試車輛"
+
+"Test scenery objects":
+  zh: "测试景物"
+  zh-tw: "測試景物"
+
+"Put a bus on the track and drive it: what its scripts do, whether its dashboard and its doors work, and what it sounds like.":
+  zh: "把一辆车放上场开一开：看它的脚本做什么、仪表和车门好不好使、听起来怎么样。"
+  zh-tw: "把一輛車放上場開一開：看它的指令碼做什麼、儀表和車門好不好使、聽起來怎麼樣。"
+
+"Put an object on the track and watch it: an object with a script of its own, whose animation or variables may not do what its author meant.":
+  zh: "把一个景物放上场盯着它：带脚本的景物，它的动画或变量可能没有按作者的意图工作。"
+  zh-tw: "把一個景物放上場盯著它：帶指令碼的景物，它的動畫或變數可能沒有按作者的意圖運作。"
+
+"Neither is written yet. The track itself - the ground, the light and the camera - is the part the editor already has.":
+  zh: "这两个都还没做。场地本身——地面、光照和相机——编辑器已经有了。"
+  zh-tw: "這兩個都還沒做。場地本身——地面、光照和相機——編輯器已經有了。"
+
+"Making a new map is not written yet.":
+  zh: "新建地图还没做。"
+  zh-tw: "新建地圖還沒做。"
+

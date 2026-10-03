@@ -28,6 +28,7 @@
 
 mod repl;
 mod gizmo;
+mod start;
 mod ui;
 mod view;
 mod window;
@@ -105,6 +106,12 @@ struct Args {
     #[arg(long, value_name = "tool")]
     ui_tool: Option<String>,
 
+    /// With `--ui-shot`: which section of the *first* page to draw - `maps`, `vehicles` or
+    /// `testing`. There are three pages before a map is open, and this is how one of them is
+    /// looked at without clicking through to it.
+    #[arg(long, value_name = "section")]
+    ui_section: Option<String>,
+
     /// Look from this height above the ground for `--shot-at` (m).
     #[arg(long, default_value_t = 80.0)]
     height: f64,
@@ -156,7 +163,7 @@ fn main() -> Result<()> {
             Some(_) => Some(resolve_map(&root, args.map.as_deref(), ask)?),
             None => None,
         };
-        return ui_shot(&root, map.as_deref(), destination, args.ui_tool.as_deref(), out);
+        return ui_shot(&root, map.as_deref(), destination, args.ui_tool.as_deref(), args.ui_section.as_deref(), out);
     }
 
     // which map: named, asked for here, or - when a window is going to open - asked for in
@@ -234,7 +241,14 @@ fn shot(root: &Path, map: &Path, x: f64, y: f64, args: &Args) -> Result<()> {
 /// it. Without one: the start page, which is the page the window opens on. The same panels at
 /// the same size either way, so the layout can be looked at where there is no screen to open
 /// a window on - and so a change to it can be checked without one.
-fn ui_shot(root: &Path, map: Option<&Path>, destination: Destination, mark: Option<&str>, out: &Path) -> Result<()> {
+fn ui_shot(
+    root: &Path,
+    map: Option<&Path>,
+    destination: Destination,
+    mark: Option<&str>,
+    section: Option<&str>,
+    out: &Path,
+) -> Result<()> {
     openomsi_game::host::install_ui_language();
     let mut instance = openomsi_game::host::instance();
     let mut renderer = openomsi_game::host::renderer(&mut instance, None, root)?;
@@ -259,6 +273,14 @@ fn ui_shot(root: &Path, map: Option<&Path>, destination: Destination, mark: Opti
 
     if session.is_none() {
         panels.set_maps(map_entries(root));
+        panels.set_vehicles(vehicle_entries());
+        // which of the three pages to draw (the map editor's own is what it opens on)
+        if let Some(name) = section {
+            match start::Section::named(name) {
+                Some(s) => panels.show_section(s),
+                None => bail!("--ui-section {name}: expected maps, vehicles or testing"),
+            }
+        }
     }
     // what the window would tell them: the panels decide the layout, the caller the size
     let frame = match (&mut session, opened) {
@@ -417,6 +439,51 @@ fn map_entries(root: &Path) -> Vec<ui::MapEntry> {
             ui::MapEntry { name, cfg, from_content }
         })
         .collect()
+}
+
+/// The vehicles the vehicle page lists: every `.bus` and `.ovh` under `Vehicles`, read from
+/// the content folder first and the installation second - the same two folders, and the same
+/// order, that a map is found in.
+///
+/// A name that is in both folders is listed once, and which copy it is is the content
+/// folder's: it is what the game itself would load. A folder holding both `X.bus` and `X.ovh`
+/// is one vehicle, named by the `.bus` - the file a bus is started from - because the pair is
+/// how a bus is written, not two buses.
+fn vehicle_entries() -> Vec<ui::VehicleEntry> {
+    let content = omsi_launcher_lib::player_content_dir();
+    let mut folders: Vec<String> = omsi_cfg::read_dir_merged("Vehicles")
+        .into_iter()
+        .filter_map(|d| d.file_name().map(|n| n.to_string_lossy().to_string()))
+        .collect();
+    folders.sort();
+    let mut out: Vec<ui::VehicleEntry> = Vec::new();
+    for folder in folders {
+        // by name, with the `.bus` winning: a folder is read whole before its names are
+        // sorted, so which of the two files turned up first cannot decide it
+        let mut named: std::collections::HashMap<String, (std::path::PathBuf, bool)> = std::collections::HashMap::new();
+        for f in omsi_cfg::read_dir_merged(&format!("Vehicles/{folder}")) {
+            let extension = f.extension().map(|e| e.to_string_lossy().to_ascii_lowercase());
+            let bus = match extension.as_deref() {
+                Some("bus") => true,
+                Some("ovh") => false,
+                _ => continue,
+            };
+            let stem = f.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            if stem.is_empty() {
+                continue;
+            }
+            if !named.get(&stem).is_some_and(|(_, already_a_bus)| *already_a_bus) {
+                named.insert(stem, (f, bus));
+            }
+        }
+        let mut names: Vec<(String, std::path::PathBuf)> = named.into_iter().map(|(k, (p, _))| (k, p)).collect();
+        names.sort();
+        for (name, path) in names {
+            let from_content = content.as_ref().is_some_and(|c| under(&path, c));
+            out.push(ui::VehicleEntry { name, folder: folder.clone(), from_content });
+        }
+    }
+    out
 }
 
 /// Whether `path` is inside `dir`, by the text of the two - the paths here come from the same
