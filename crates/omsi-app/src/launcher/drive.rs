@@ -782,7 +782,9 @@ fn map_labels(l: &mut Launcher, map: Rect, avoid: &[Rect]) {
     if let Some(i) = l.mapview.hovered().or_else(|| l.mapview.shown_of(l.state.choice.entry)) {
         if let (Some(name), Some(at)) = (l.mapview.entry_name(i).map(str::to_string), l.mapview.entry_at(i)) {
             if map.contains(at) {
-                let w = l.ui.width(&name, 11.5, Weight::Medium) + 14.0;
+                // (the box in the weight the name is drawn in: measured as Medium and drawn as
+                // Bold, it came up a few per cent narrow and the name lost its last letters)
+                let w = l.ui.width(&name, 11.5, Weight::Bold) + 16.0;
                 let right = Rect::new(at.x + 12.0, at.y - 28.0, w, 20.0);
                 let left = Rect::new(at.x - 12.0 - w, at.y - 28.0, w, 20.0);
                 // (the name in full: it used to be cut at thirty-two characters, a trade the map
@@ -808,14 +810,17 @@ fn map_labels(l: &mut Launcher, map: Rect, avoid: &[Rect]) {
             continue;
         }
         let time = hhmm(st.arr);
-        let w = l.ui.width(&st.name, 11.0, Weight::Medium) + l.ui.width(&time, 11.0, Weight::Bold) + 22.0;
+        // (the card: the time, the name, and the room either side of them - the name given its
+        // own width in the weight it is drawn in, so the fit never has to cut a stop's name)
+        let tw = l.ui.width(&time, 11.0, Weight::Bold);
+        let nw = l.ui.width(&st.name, 11.0, Weight::Medium);
+        let w = tw + nw + 26.0;
         let right = Rect::new(at.x + 9.0, at.y - 9.0, w, 18.0);
         let left = Rect::new(at.x - 9.0 - w, at.y - 9.0, w, 18.0);
         let Some(rr) = [right, left].into_iter().find(|r| inside(r) && !taken.iter().any(|t| hits(t, r))) else { continue };
         l.ui.p().rounded(rr, 4.0, Color::rgba(10, 10, 10, 0.84));
-        let tw = l.ui.width(&time, 11.0, Weight::Bold);
-        l.ui.text_in(&time, Rect::new(rr.x + 6.0, rr.y, tw + 2.0, rr.h), 11.0, Weight::Bold, ACCENT, Align::Left);
-        l.ui.text_in(&st.name, Rect::new(rr.x + 12.0 + tw, rr.y, rr.w - tw - 16.0, rr.h), 11.0, Weight::Medium, TEXT_SOFT, Align::Left);
+        l.ui.text_in(&time, Rect::new(rr.x + 7.0, rr.y, tw + 2.0, rr.h), 11.0, Weight::Bold, ACCENT, Align::Left);
+        l.ui.text_in(&st.name, Rect::new(rr.x + 13.0 + tw, rr.y, nw + 8.0, rr.h), 11.0, Weight::Medium, TEXT_SOFT, Align::Left);
         taken.push(rr);
     }
 }
