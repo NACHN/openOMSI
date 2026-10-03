@@ -7539,37 +7539,62 @@ impl World {
         self.refresh_tile_lists();
     }
 
-    /// The map objects a ray from `eye` along `forward` picks up, nearest first - how a click
-    /// chooses one.
+    /// The map objects a ray meets: from `eye` along `forward`, within `reach` metres,
+    /// nearest first - how a click chooses one, and what `NextPick` walks when one object
+    /// stands behind another.
     ///
-    /// Angular rather than by distance, so a near post beside the middle of the view comes
-    /// before a far house right in it, and only what is loaded is looked at - which is
-    /// exactly what is on the screen. `reach` is how far a click can pick something up (m).
-    pub fn pick_candidates(&self, eye: DVec3, forward: glam::Vec3, reach: f64) -> Vec<i64> {
-        let f = forward.as_dvec3().normalize_or_zero();
-        if f == DVec3::ZERO {
+    /// The ray is measured against each object's own box, where the map has it *drawn* - the
+    /// instance transforms the renderer holds - so what a click takes is what the crosshair is
+    /// actually over: a house is picked on its wall, and the grass three metres from its door
+    /// is not the house. The test this replaces asked how close the ray passed the object's
+    /// own origin, and that origin is the place its map record puts down *on the ground* - so
+    /// anything tall or wide had to be aimed at by its feet, and a lamp post was a target a
+    /// couple of pixels across.
+    ///
+    /// Only what is on the screen can be picked. A tile that is not loaded has no instances,
+    /// and an object the editor took away is not visible, so nothing off the screen is caught
+    /// by clicking where it used to stand.
+    pub fn pick_candidates(&self, scene: &Scene, eye: DVec3, forward: glam::Vec3, reach: f64) -> Vec<i64> {
+        let dir = forward.normalize_or_zero();
+        if dir == glam::Vec3::ZERO {
             return Vec::new();
         }
         let objects = self.edit_objects.lock();
-        let edits = self.object_edits.lock();
-        let mut scored: Vec<(f64, i64)> = objects
-            .iter()
-            .filter_map(|(id, o)| {
-                let e = edits.get(id).copied().unwrap_or_default();
-                if e.deleted {
-                    return None;
+        let mut hits: Vec<(f64, i64)> = Vec::new();
+        let mut tested = 0usize;
+        for (id, o) in objects.iter() {
+            // one object, one distance: its nearest part is what a click would take, however
+            // many meshes it is drawn with
+            let mut nearest: Option<f64> = None;
+            for inst in &o.instances {
+                let Some(i) = scene.instances.get(*inst).filter(|i| i.visible) else { continue };
+                let Some(mesh) = scene.meshes.get(i.mesh) else { continue };
+                tested += 1;
+                // the ray in the mesh's own frame: the instance's transform carries the
+                // object's own turn and scale, so a wall standing at an angle is met on the
+                // wall rather than on the box that would box it in
+                let inv = i.transform.inverse();
+                let o_l = (inv * (eye - i.origin).as_vec3().extend(1.0)).truncate();
+                let d_l = (inv * dir.extend(0.0)).truncate();
+                let Some(t) = ray_box(o_l, d_l, mesh.bounds_min, mesh.bounds_max) else { continue };
+                // where that came out on the map, and how far. Worked out where it is drawn
+                // rather than taken from `t`, which is measured in the mesh's own metres -
+                // the instance's scale is the difference.
+                let at = i.origin + (i.transform * (o_l + d_l * t).extend(1.0)).truncate().as_dvec3();
+                let distance = (at - eye).length();
+                if distance <= reach && nearest.map(|n| distance < n).unwrap_or(true) {
+                    nearest = Some(distance);
                 }
-                let d = o.pos + e.moved - eye;
-                let along = d.dot(f);
-                if !(1.0..reach).contains(&along) {
-                    return None;
-                }
-                let off = (d - f * along).length() / along;
-                (off < 0.35).then_some((off + along * 0.0015, *id))
-            })
-            .collect();
-        scored.sort_by(|a, b| a.0.total_cmp(&b.0));
-        scored.into_iter().map(|s| s.1).collect()
+            }
+            if let Some(distance) = nearest {
+                hits.push((distance, *id));
+            }
+        }
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // (the two numbers worth having when a click lands on nothing: how many boxes were
+        // measured, and whether the ray was in among the objects at all)
+        log::debug!("pick: {} hits of {} objects, {tested} boxes tested; eye {eye:?} dir {dir:?}", hits.len(), objects.len());
+        hits.into_iter().map(|(_, id)| id).collect()
     }
 
     /// The file tile (tx, ty) is read from, and the map folder's place relative to `root`.
@@ -13411,3 +13436,77 @@ fn night_texture_name(texture: &str) -> String {
 
 /// OMSI_CHECK_SPLINES: every spline's two ends, its neighbours in the chain and its file.
 pub(crate) static SPLINE_ENDS: std::sync::LazyLock<Mutex<HashMap<i64, (DVec3, DVec3, i64, i64, String)>>> = std::sync::LazyLock::new(Default::default);
+
+/// Where a ray meets a box, or nothing - how a click finds out what it is over (see
+/// [`World::object_under`]).
+///
+/// `o` and `d` are the ray's origin and direction *in the box's own frame*, which is what
+/// makes a turned object answer for its own faces rather than for a box grown round it: the
+/// instance's transform is what puts the ray there. The answer is how far along `d` the near
+/// face is, never behind the ray's own start.
+fn ray_box(o: glam::Vec3, d: glam::Vec3, lo: glam::Vec3, hi: glam::Vec3) -> Option<f32> {
+    let mut near = f32::NEG_INFINITY;
+    let mut far = f32::INFINITY;
+    for k in 0..3 {
+        if d[k].abs() < 1e-12 {
+            // parallel to this pair of faces: inside them the whole way, or never
+            if o[k] < lo[k] || o[k] > hi[k] {
+                return None;
+            }
+            continue;
+        }
+        let (mut a, mut b) = ((lo[k] - o[k]) / d[k], (hi[k] - o[k]) / d[k]);
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        near = near.max(a);
+        far = far.min(b);
+    }
+    (far >= near.max(0.0)).then(|| near.max(0.0))
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::ray_box;
+    use glam::Vec3;
+
+    /// The unit box, so the numbers in these tests read as themselves.
+    const LO: Vec3 = Vec3::ZERO;
+    const HI: Vec3 = Vec3::ONE;
+
+    #[test]
+    fn a_ray_through_a_box_comes_back_at_its_near_face() {
+        assert_eq!(ray_box(Vec3::new(0.5, 0.5, -5.0), Vec3::Z, LO, HI), Some(5.0));
+    }
+
+    #[test]
+    fn a_ray_that_misses_the_box_finds_nothing() {
+        assert_eq!(ray_box(Vec3::new(3.0, 0.5, -5.0), Vec3::Z, LO, HI), None);
+    }
+
+    #[test]
+    fn a_box_behind_the_ray_is_not_met() {
+        assert_eq!(ray_box(Vec3::new(0.5, 0.5, -5.0), -Vec3::Z, LO, HI), None);
+    }
+
+    #[test]
+    fn a_ray_that_starts_inside_meets_the_box_at_once() {
+        assert_eq!(ray_box(Vec3::new(0.5, 0.5, 0.5), Vec3::Z, LO, HI), Some(0.0));
+    }
+
+    /// Along a pair of faces' own line but outside them: parallel, so never - and this is the
+    /// case a naive slab test gets wrong by dividing by zero.
+    #[test]
+    fn a_ray_parallel_to_a_pair_of_faces_and_outside_them_finds_nothing() {
+        assert_eq!(ray_box(Vec3::new(-1.0, 0.5, 0.0), Vec3::Z, LO, HI), None);
+    }
+
+    /// A box with no size at all is still met exactly where it is, and nowhere else - which is
+    /// what an empty mesh's box is.
+    #[test]
+    fn a_box_with_no_size_is_met_only_where_it_stands() {
+        let point = Vec3::splat(2.0);
+        assert_eq!(ray_box(Vec3::new(2.0, 2.0, -5.0), Vec3::Z, point, point), Some(7.0));
+        assert_eq!(ray_box(Vec3::new(3.0, 2.0, -5.0), Vec3::Z, point, point), None);
+    }
+}

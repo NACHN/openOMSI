@@ -150,6 +150,23 @@ impl Shown {
         let eo = objects.get(&id)?;
         crate::gizmo::bubble(scene, &eo.instances)
     }
+
+    /// The instances object `id` is drawn with - what the outline is drawn round, one ring
+    /// being several instances wide (see `Scene::outline`).
+    ///
+    /// A copy placed this session answers out of its own helper object, as `bubble` does: it is
+    /// not in the world's index until the map is saved.
+    pub fn instances_of(&self, world: &World, id: i64) -> Vec<usize> {
+        if let Some(p) = self.placed.get(&id) {
+            return p.gpu.instances.clone();
+        }
+        world
+            .edit_objects
+            .lock()
+            .get(&id)
+            .map(|o| o.instances.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl View {
@@ -410,22 +427,43 @@ impl View {
         self.asked_for = None;
     }
 
-    /// The way the view looks, taken from the camera the picture is drawn with rather than
-    /// worked out again here: the editor and the game cannot then disagree about which way
-    /// "forward" is.
-    pub fn forward(&self) -> DVec3 {
-        self.camera.forward().as_dvec3()
+    /// Stand `height` metres above `at` and look straight down at it.
+    ///
+    /// The crosshair then rests on that very place, which is what "look at this spot" means
+    /// when the point is to have something under it - picking, and the mark drawn on what was
+    /// picked. `look_at` names a place for a *picture* of the map and keeps the camera's own
+    /// tilt, so its crosshair lands eighty metres past the place it names; this is the other
+    /// question, and `--ui-aim` asks it.
+    pub fn hover_over(&mut self, at: DVec3, height: f64) {
+        self.camera.position = at + DVec3::Z * height;
+        self.camera.yaw = 0.0;
+        self.camera.pitch = -89.0;
+        self.asked_for = None;
     }
 
-    /// Where the middle of the view meets the ground, within 4 km - what a click means.
+    /// Where the middle of the view meets the ground, within 4 km. Kept for what only wants to
+    /// know where the view is pointed without saying from where - everything that answers to
+    /// the pointer goes through `aim_along`.
     ///
     /// The ray walk is the ground brush's own, from `omsi-editor-core`: the editor aims the
     /// brush and picks an object with exactly the point the game's in-game editor would.
     pub fn aim(&self) -> Option<DVec3> {
+        self.aim_along((0.0, 0.0), 1.0)
+    }
+
+    /// Where the ray through a place in the frame meets the ground, within 4 km - what a click
+    /// means. `ndc` is -1..1 across the picture, as the pointer arrives in (see `ray`); the
+    /// middle of the view is `(0, 0)`.
+    ///
+    /// The pointer's own aim rather than the middle of the view's: an editor aims with the
+    /// pointer, and the outline that says what is under it (see `Scene::outline`) has to name
+    /// the same place a click would.
+    pub fn aim_along(&self, ndc: (f32, f32), aspect: f32) -> Option<DVec3> {
+        let (eye, dir) = self.ray(ndc, aspect);
         omsi_editor_core::ground::aim(
             |x, y| self.world.ground_terrain(x, y),
-            self.camera.position,
-            self.forward(),
+            eye,
+            dir,
             4000.0,
         )
     }

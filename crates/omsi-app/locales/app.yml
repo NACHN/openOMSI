@@ -21662,27 +21662,27 @@ _version: 2
 "How far an arrow key moves and turns - click to change":
   zh: "方向键移动和旋转的步长 - 单击切换"
   zh-tw: "方向鍵移動和旋轉的步長 - 單擊切換"
-"Left click chooses what the crosshair is on":
-  zh: "左键选中准星所指的物体"
-  zh-tw: "左鍵選中準星所指的物件"
-"Left click levels the ground to where the crosshair is":
-  zh: "左键把地面整平到准星所在的高度"
-  zh-tw: "左鍵把地面整平到準星所在的高度"
-"Left click puts a copy where the crosshair meets the ground":
-  zh: "左键在准星与地面的交点上放置副本"
-  zh-tw: "左鍵在準星與地面的交點上放置副本"
+"Left click chooses what the pointer is on":
+  zh: "左键选中指针所指的物体"
+  zh-tw: "左鍵選中指標所指的物件"
+"Left click levels the ground to where the pointer is":
+  zh: "左键把地面整平到指针所在的高度"
+  zh-tw: "左鍵把地面整平到指標所在的高度"
+"Left click puts a copy where the pointer meets the ground":
+  zh: "左键在指针与地面的交点上放置副本"
+  zh-tw: "左鍵在指標與地面的交點上放置副本"
 "Left click raises the ground by the step · Shift lowers it":
   zh: "左键按步长升高地面 · Shift 降低"
   zh-tw: "左鍵按步長升高地面 · Shift 降低"
-"Left click takes away what the crosshair is on":
-  zh: "左键移除准星所指的物体"
-  zh-tw: "左鍵移除準星所指的物件"
+"Left click takes away what the pointer is on":
+  zh: "左键移除指针所指的物体"
+  zh-tw: "左鍵移除指標所指的物件"
 "Move":
   zh: "移动"
   zh-tw: "移動"
 "Move to aim":
-  zh: "移到准星处"
-  zh-tw: "移到準星處"
+  zh: "移到指针处"
+  zh-tw: "移到指標處"
 "No changes yet":
   zh: "尚无改动"
   zh-tw: "尚無變更"
@@ -21692,9 +21692,9 @@ _version: 2
 "Nothing to take back":
   zh: "没有可撤销的操作"
   zh-tw: "沒有可復原的操作"
-"Nothing under the crosshair.":
-  zh: "准星下没有物体。"
-  zh-tw: "準星下沒有物件。"
+"Nothing under the pointer.":
+  zh: "指针下没有物体。"
+  zh-tw: "指標下沒有物件。"
 "Open the console":
   zh: "展开命令面板"
   zh-tw: "展開指令面板"
@@ -21722,9 +21722,9 @@ _version: 2
 "Take away":
   zh: "移除"
   zh-tw: "移除"
-"The crosshair is not on any ground.":
-  zh: "准星没有落在地面上。"
-  zh-tw: "準星沒有落在地面上。"
+"The pointer is not on any ground.":
+  zh: "指针没有落在地面上。"
+  zh-tw: "指標沒有落在地面上。"
 "The game reads that copy before the original map, which is never touched.":
   zh: "游戏会先读取这份副本，原地图文件不会被改动。"
   zh-tw: "遊戲會先讀取這份副本，原地圖檔案不會被更動。"
@@ -21758,12 +21758,12 @@ _version: 2
 "could not save":
   zh: "无法保存"
   zh-tw: "無法儲存"
-"crosshair":
-  zh: "准星"
-  zh-tw: "準星"
-"crosshair is not on the ground":
-  zh: "准星没有落在地面上"
-  zh-tw: "準星沒有落在地面上"
+"pointer":
+  zh: "指针"
+  zh-tw: "指標"
+"pointer is not on the ground":
+  zh: "指针没有落在地面上"
+  zh-tw: "指標沒有落在地面上"
 "heading":
   zh: "朝向"
   zh-tw: "朝向"
@@ -21851,6 +21851,47 @@ _version: 2
   zh: "新建地图"
   zh-tw: "新建地圖"
 
+"A name for a new map":
+  zh: "给新地图起个名字"
+  zh-tw: "給新地圖起個名字"
+
+"A new map was made:":
+  zh: "已新建地图："
+  zh-tw: "已新建地圖："
+
+"No content folder is known, and a map is never written into the installation":
+  zh: "找不到 content 文件夹，而地图绝不会写进原版安装里"
+  zh-tw: "找不到 content 資料夾，而地圖絕不會寫進原版安裝裡"
+
+"A map needs a name":
+  zh: "地图得有个名字"
+  zh-tw: "地圖得有名字"
+
+"A map's name cannot hold a character a file name cannot":
+  zh: "地图名不能含文件名不允许的字符"
+  zh-tw: "地圖名不能含檔案名不允許的字元"
+
+"A map's name cannot start or end with a dot":
+  zh: "地图名不能以点开头或结尾"
+  zh-tw: "地圖名不能以點開頭或結尾"
+
+# (64 is `newmap::NAME_LIMIT`: the two must say the same thing)
+"A map's name must be at most 64 characters long":
+  zh: "地图名最长 64 个字符"
+  zh-tw: "地圖名最長 64 個字元"
+
+"A map of that name is already there":
+  zh: "已经有同名地图了"
+  zh-tw: "已經有同名地圖了"
+
+"Back to the maps":
+  zh: "回到地图列表"
+  zh-tw: "回到地圖清單"
+
+"Save, or take the changes back, before opening another map":
+  zh: "先保存，或者先把改动退回去，再打开别的地图"
+  zh-tw: "先儲存，或者先把改動退回去，再開啟別的地圖"
+
 "This map":
   zh: "这张地图"
   zh-tw: "這張地圖"
@@ -21906,8 +21947,4 @@ _version: 2
 "Neither is written yet. The track itself - the ground, the light and the camera - is the part the editor already has.":
   zh: "这两个都还没做。场地本身——地面、光照和相机——编辑器已经有了。"
   zh-tw: "這兩個都還沒做。場地本身——地面、光照和相機——編輯器已經有了。"
-
-"Making a new map is not written yet.":
-  zh: "新建地图还没做。"
-  zh-tw: "新建地圖還沒做。"
 

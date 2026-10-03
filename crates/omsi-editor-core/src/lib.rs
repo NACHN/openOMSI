@@ -13,6 +13,8 @@
 //! * [`ground`]: the ground brush, shaping one tile's height field;
 //! * [`document`]: the open map - its tiles, its object index, what has been changed, and how
 //!   it is written back;
+//! * [`newmap`]: a map where there was none - the one place here that writes a first version
+//!   rather than a change to somebody else's;
 //! * [`command`]: one change and its inverse, so every step can be taken back;
 //! * [`session`]: the map, the history, the selection and the brush together - what a front
 //!   end drives, whether that is a terminal or a window.
@@ -35,6 +37,7 @@ pub mod codec;
 pub mod command;
 pub mod document;
 pub mod ground;
+pub mod newmap;
 pub mod record;
 pub mod session;
 
@@ -42,6 +45,7 @@ pub use codec::Encoding;
 pub use command::{Command, History};
 pub use document::{companion, tile_origin, Destination, Document, NewObject, ObjectRef, SaveReport, TileDoc, TileId};
 pub use ground::{GroundAction, GridRect, BRUSH_DEFAULT, BRUSH_MAX, BRUSH_MIN};
+pub use newmap::{clean_name, create as create_map, MadeMap};
 pub use record::{add_copies, object_records, record_lines, rewrite_tile, NewRecord, ObjectEdit, ObjectRecord};
 pub use session::{clamp_brush, Selection, Session};
 

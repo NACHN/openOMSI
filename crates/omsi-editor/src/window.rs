@@ -24,7 +24,7 @@ use anyhow::Result;
 use glam::{DVec3, Vec2};
 use openomsi_game::host;
 use omsi_editor_core::{Destination, ObjectEdit, Selection, Session};
-use omsi_render::{Renderer, Scene, SurfaceState};
+use omsi_render::{Mark, Renderer, Scene, SurfaceState};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -53,6 +53,23 @@ struct Drag {
     /// Where on the object's own plane the pointer was - what a turn is measured from, so the
     /// object turns by the angle the pointer moved rather than jumping to face it.
     from: DVec3,
+}
+
+/// Put the outline's marks on the scene: the object under the pointer in amber, the one that
+/// is chosen in white (see `Scene::outline`).
+///
+/// The chosen one comes last, and the renderer draws the marks in that order, so a chosen
+/// object under the pointer is drawn white over its own amber - which is what makes the two
+/// colours answer "what would a click take" and "what has it taken" without either hiding the
+/// other.
+pub(crate) fn mark_outline(scene: &mut Scene, world: &host::World, shown: &Shown, hover: Option<i64>, chosen: Option<i64>) {
+    scene.outline.clear();
+    for (id, mark) in [(hover, Mark::Hover), (chosen, Mark::Chosen)] {
+        let Some(id) = id else { continue };
+        for instance in shown.instances_of(world, id) {
+            scene.outline.push((instance as u32, mark));
+        }
+    }
 }
 
 /// The editor program: the editing session, the map drawn, and the panels over it.
@@ -110,6 +127,11 @@ struct Editor {
     aim: Option<DVec3>,
     /// Set once the window has been asked to close.
     closing: bool,
+    /// The page that lists the maps is the one on screen, rather than the map that is open.
+    ///
+    /// The session behind it is kept: an edit that has not been written lives in it, and
+    /// asking for the list back is not the same as giving the map up.
+    at_start: bool,
 }
 
 /// Open the window - on `map` when one was named, on the start page when none was.
@@ -123,6 +145,8 @@ pub fn run(root: &Path, map_cfg: Option<PathBuf>, destination: Destination) -> R
     };
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Poll);
+    // with no map asked for, the window opens on the list of them
+    let at_start = map_cfg.is_none();
     let mut editor = Editor {
         root: root.to_path_buf(),
         content: omsi_launcher_lib::player_content_dir(),
@@ -151,6 +175,7 @@ pub fn run(root: &Path, map_cfg: Option<PathBuf>, destination: Destination) -> R
         fps: 0.0,
         aim: None,
         closing: false,
+        at_start,
     };
     // the page's list, read before the window is opened so the first frame has it
     if editor.session.is_none() {
@@ -205,6 +230,10 @@ impl Editor {
         self.renderer = Some(renderer);
         self.surface = Some(surface);
         self.window = Some(window.clone());
+        // the pointer starts in the middle of the window rather than at (0, 0): it is what the
+        // editor aims with, and a pointer in the corner would aim at the corner of the map
+        // until the mouse is moved over it
+        self.cursor = (size.width as f64 * 0.5, size.height as f64 * 0.5);
         // a map named on the command line is opened here, where there is a renderer to draw
         // it with; the start page is left standing otherwise
         if let Some(map) = self.map_cfg.clone() {
@@ -222,10 +251,33 @@ impl Editor {
 
     /// The window's own title: what is open, or that nothing is yet.
     fn title(&self) -> String {
-        if let Some(s) = self.session.as_ref() {
-            format!("openOMSI editor - {}", s.doc().global().name)
-        } else {
-            "openOMSI editor".to_string()
+        // the list showing is not the map being edited, and the title says which is which
+        match self.session.as_ref().filter(|_| !self.at_start) {
+            Some(s) => format!("openOMSI editor - {}", s.doc().global().name),
+            None => "openOMSI editor".to_string(),
+        }
+    }
+
+    /// Show the map: the editing panels, rather than the list of maps.
+    fn show_the_map(&mut self) {
+        self.at_start = false;
+        if let Some(w) = self.window.as_ref() {
+            w.set_title(&self.title());
+        }
+    }
+
+    /// The top bar's way back: show the list of maps, session and all.
+    ///
+    /// Nothing is closed and nothing is thrown away - the map goes on being open, so coming
+    /// back to it is instant, and a change that has not been written is still there to write.
+    /// Opening *another* map from the list is the thing that would leave the change behind,
+    /// and that is refused while there is one (see `open_the_chosen_map`).
+    fn back_to_the_maps(&mut self) {
+        if self.panels.take_back() {
+            self.at_start = true;
+            if let Some(w) = self.window.as_ref() {
+                w.set_title(&self.title());
+            }
         }
     }
 
@@ -283,14 +335,22 @@ impl Editor {
         self.gizmo_now = None;
         self.kind_now = Kind::None;
         self.aim = None;
-        if let Some(w) = self.window.as_ref() {
-            w.set_title(&self.title());
-        }
+        self.show_the_map();
     }
 
     /// One frame: the map and the panels over it, or the start page while there is no map.
     fn draw(&mut self, dt: f32) {
         let Some(window) = self.window.clone() else { return };
+        // read before the frame's own borrows: what is hovered and what is dragged are what
+        // the marks are drawn from, and a method on the whole `self` cannot be asked for once
+        // the frame has borrowed its fields
+        let (hot, tool) = (self.hot, self.panels.tool);
+        // where the pointer is, in the two forms a ray needs
+        let (ndc, aspect) = (self.pointer_ndc(), self.aspect());
+        // the outline follows the pointer, but not while the view is being turned with the
+        // right button (a hidden pointer) and not over the panels
+        let over_map = !self.looking && self.panels.cursor().is_none();
+        let dragging = self.drag.as_ref().map(|d| d.handle);
         let (Some(surface), Some(renderer)) = (self.surface.as_ref(), self.renderer.as_mut()) else { return };
         let (wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame)) =
             surface.surface.get_current_texture()
@@ -300,14 +360,13 @@ impl Editor {
         let size = (surface.config.width, surface.config.height);
         let scale = window.scale_factor() as f32;
         let target = frame.texture.create_view(&Default::default());
-        // read before the frame's own borrows: what is hovered and what is dragged are what
-        // the marks are drawn from
-        let (hot, tool) = (self.hot, self.panels.tool);
-        let dragging = self.drag.as_ref().map(|d| d.handle);
         self.gizmo_now = None;
 
-        let ui_frame = match (self.session.as_mut(), self.scene.as_mut(), self.view.as_mut()) {
-            (Some(session), Some(scene), Some(view)) => {
+        // the editing panels, unless the list of maps is what is showing: nothing opened yet,
+        // or the top bar's way back (`back_to_the_maps`). The list draws its own background
+        // over the whole window, so the map of the last frame needs no clearing.
+        let ui_frame = match (self.at_start, self.session.as_mut(), self.scene.as_mut(), self.view.as_mut()) {
+            (false, Some(session), Some(scene), Some(view)) => {
                 // the tiles follow the camera; the frame after a tile arrives is the one that
                 // shows it
                 let stats = view.stream(renderer, scene);
@@ -326,6 +385,16 @@ impl Editor {
                 let bubble = chosen.as_ref().and_then(|s| self.shown.bubble(view.world(), scene, s.id));
                 let (show, gizmo) = gizmo::show_for(tool, dragging.or(hot), chosen, drawn, bubble, view.camera(), size.1 as f32);
                 self.marks.draw(renderer, scene, &show);
+                // what the outline is drawn round: the object under the pointer, and the one
+                // that is chosen (see `Scene::outline`). On the scene before the frame that
+                // draws it, as the bubble and the gizmo are.
+                let hover = over_map
+                    .then(|| {
+                        let (eye, dir) = view.ray(ndc, aspect);
+                        host::pick(view.world(), scene, eye, dir.as_vec3())
+                    })
+                    .flatten();
+                mark_outline(scene, view.world(), &self.shown, hover, session.selected_id());
                 // where the gizmo is, for the frame that has to pick a handle on it: the one
                 // that was just drawn rather than one worked out again later. While a drag is
                 // in hand the frozen one is the one in use.
@@ -340,7 +409,7 @@ impl Editor {
                 let info = Info { fps: self.fps, loaded_tiles: view.loaded_count(), aim: self.aim, holding };
                 self.panels.build(session, view, &info, renderer, size, scale, dt)
             }
-            // nothing is open yet: the page that asks which map
+            // no map open, or one that never got its scene: the page that asks which map
             _ => {
                 let start = Start { root: &self.root, content: self.content.as_deref(), destination: &self.destination };
                 self.panels.build_start(&start, renderer, size, scale, dt)
@@ -366,7 +435,8 @@ impl Editor {
     /// Move the camera by however long the last frame took. Not while a field has the keys:
     /// someone typing `mv 2 0 0` into the console is not flying south.
     fn tick(&mut self, dt: f64) {
-        if self.panels.typing() {
+        // a field with the keys, or the list of maps showing: neither of those is flying
+        if self.panels.typing() || self.at_start {
             return;
         }
         let Some(view) = self.view.as_mut() else { return };
@@ -419,10 +489,11 @@ impl Editor {
             }
         }
         let (picked, aim) = {
-            let Some(view) = self.view.as_ref() else { return };
-            // `camera().forward()` and not `view.forward()`: the same direction, in the
-            // single-precision the world picks with
-            (host::pick(view.world(), view.camera().position, view.camera().forward()), self.aim)
+            let (Some(view), Some(scene)) = (self.view.as_ref(), self.scene.as_ref()) else { return };
+            // the pointer's own ray and not the middle of the view's: what is lit up is what
+            // the click takes, and the pointer is what an editor points with
+            let (eye, dir) = view.ray(self.pointer_ndc(), self.aspect());
+            (host::pick(view.world(), scene, eye, dir.as_vec3()), self.aim)
         };
         let tool = self.panels.tool;
         match tool {
@@ -431,7 +502,7 @@ impl Editor {
                 session.select(picked);
                 let line = match picked {
                     Some(_) => session.selection_summary(),
-                    None => "Nothing under the crosshair.".to_string(),
+                    None => "Nothing under the pointer.".to_string(),
                 };
                 self.panels.say(line);
             }
@@ -442,16 +513,16 @@ impl Editor {
                     }
                     self.act(|s| s.set_selected_deleted(true));
                 }
-                None => self.panels.say("Nothing under the crosshair."),
+                None => self.panels.say("Nothing under the pointer."),
             },
             Tool::Move => match (self.selected(), aim) {
                 (None, _) => self.panels.say("Choose something first."),
-                (_, None) => self.panels.say("The crosshair is not on any ground."),
+                (_, None) => self.panels.say("The pointer is not on any ground."),
                 (Some(_), Some(at)) => self.act(move |s| s.move_selected_on_the_ground(at)),
             },
             Tool::Turn => match (self.selection(), aim) {
                 (None, _) => self.panels.say("Choose something first."),
-                (_, None) => self.panels.say("The crosshair is not on any ground."),
+                (_, None) => self.panels.say("The pointer is not on any ground."),
                 (Some(sel), Some(at)) => {
                     let p = sel.position();
                     // heading 0 is north (+y) and grows clockwise, as the map's headings do
@@ -461,7 +532,7 @@ impl Editor {
             },
             Tool::Place => match (self.selected(), aim) {
                 (None, _) => self.panels.say("Choose the object to copy first."),
-                (_, None) => self.panels.say("The crosshair is not on any ground."),
+                (_, None) => self.panels.say("The pointer is not on any ground."),
                 (Some(template), Some(at)) => self.act(move |s| s.place_copy(template, None, Some(at), 0.0)),
             },
             Tool::Raise => {
@@ -469,12 +540,12 @@ impl Editor {
                 let down = self.modifiers.shift_key();
                 match aim {
                     Some(at) => self.act(move |s| s.raise_ground(at, if down { -step } else { step })),
-                    None => self.panels.say("The crosshair is not on any ground."),
+                    None => self.panels.say("The pointer is not on any ground."),
                 }
             }
             Tool::Flatten => match aim {
                 Some(at) => self.act(move |s| s.flatten_ground(at, None)),
-                None => self.panels.say("The crosshair is not on any ground."),
+                None => self.panels.say("The pointer is not on any ground."),
             },
         }
         // whatever was read for the object that was chosen before is no longer right
@@ -618,20 +689,67 @@ impl Editor {
         self.panels.act(session, f);
     }
 
-    /// The Maps page asked for a map that is not there yet.
+    /// The Maps page asked for a map that is not there yet: write it, and open it.
     ///
-    /// Making one is the one thing the page can ask for that the core cannot do: a new map is
-    /// a folder of its own with a `global.cfg`, a tile list and the terrain under it, and none
-    /// of that is written. It says so rather than opening nothing.
+    /// It goes under the content folder and nowhere else - a map is somebody's own work from
+    /// its first byte, and nothing here writes inside the OMSI 2 installation (see
+    /// `omsi_editor_core::newmap`). What a new map is made of is the core's business; all
+    /// this does is say where, and then open what came out.
+    ///
+    /// A name that is not a folder name, or one that is already taken, is answered under the
+    /// field it was typed in: the first page has no console to say it on.
     fn make_a_map(&mut self) {
-        if self.panels.take_new_map() {
-            self.panels.say(host::ui::tr("Making a new map is not written yet.").to_string());
+        let Some(name) = self.panels.take_new_map() else { return };
+        // a map that is open with something not written: the new one would take its session's
+        // place, and the change would go with it - the same answer the list gives
+        let unwritten = self.session.as_ref().map(|s| s.doc().dirty_tiles().len()).unwrap_or(0);
+        if unwritten > 0 {
+            self.panels.new_map_failed(format!(
+                "{} ({unwritten})",
+                host::ui::tr("Save, or take the changes back, before opening another map")
+            ));
+            return;
         }
+        let Some(content) = self.content.clone() else {
+            self.panels.new_map_failed(host::ui::tr("No content folder is known, and a map is never written into the installation").to_string());
+            return;
+        };
+        let made = match omsi_editor_core::create_map(&content, &name) {
+            Ok(made) => made,
+            Err(e) => {
+                self.panels.new_map_failed(e.to_string());
+                return;
+            }
+        };
+        log::info!("editor: made the map {} in {}", made.name, made.dir.display());
+        self.panels.say(format!("{} {}", host::ui::tr("A new map was made:"), made.dir.display()));
+        // the list gains it, and the page is behind us
+        self.panels.set_maps(crate::map_entries(&self.root));
+        self.open_map(&made.global);
     }
 
-    /// The first page asked for a map: open it, and the page is over.
+    /// The list of maps asked for one: open it, and the page is over.
+    ///
+    /// Three answers rather than one, because the list is now reachable while a map is open
+    /// (see [`Editor::back_to_the_maps`]). The map that is already open is *come back to*
+    /// rather than read again - a change not yet written lives in the session, and reading
+    /// the file again would leave it behind. Another map, while something is unwritten, is
+    /// refused and said out loud: the session that holds the change would go with it, and
+    /// losing somebody's afternoon to a click is not the way back. Anything else is opened.
     fn open_the_chosen_map(&mut self) {
         let Some(cfg) = self.panels.open_map.take() else { return };
+        if self.map_cfg.as_deref() == Some(cfg.as_path()) {
+            self.show_the_map();
+            return;
+        }
+        let unwritten = self.session.as_ref().map(|s| s.doc().dirty_tiles().len()).unwrap_or(0);
+        if unwritten > 0 {
+            self.panels.say(format!(
+                "{} ({unwritten})",
+                host::ui::tr("Save, or take the changes back, before opening another map")
+            ));
+            return;
+        }
         self.open_map(&cfg);
     }
 
@@ -754,7 +872,16 @@ impl ApplicationHandler for Editor {
                             return;
                         }
                         // the start page: the keys are a list's, not a map's
-                        if self.session.is_none() {
+                        if self.session.is_none() || self.at_start {
+                            // a field on it has the keys first, though: a name being typed is
+                            // not the list, and Enter there asks for the map to be made -
+                            // what the button beside the field does
+                            if self.panels.typing() {
+                                if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+                                    self.panels.make_the_new_map();
+                                }
+                                return;
+                            }
                             match code {
                                 KeyCode::ArrowDown => self.panels.choose(1),
                                 KeyCode::ArrowUp => self.panels.choose(-1),
@@ -874,8 +1001,13 @@ impl ApplicationHandler for Editor {
                     self.fps = self.fps * 0.9 + (1.0 / dt as f32) * 0.1;
                 }
                 self.tick(dt);
-                // where the crosshair is, before the frame that shows it is drawn
-                self.aim = self.view.as_ref().and_then(|v| v.aim());
+                // where the pointer is aimed at on the ground, before the frame that shows it
+                // is drawn - the place a click puts something, so it follows the pointer and
+                // not the middle of the view
+                self.aim = self
+                    .view
+                    .as_ref()
+                    .and_then(|v| v.aim_along(self.pointer_ndc(), self.aspect()));
                 // the frame draws the gizmo where it stands this one, and reads which handle
                 // the pointer is on where it was drawn last
                 self.draw(dt as f32);
@@ -888,7 +1020,7 @@ impl ApplicationHandler for Editor {
                     } else {
                         self.end_drag();
                     }
-                } else if self.session.is_some() && !self.panels.over_ui() {
+                } else if !self.at_start && self.session.is_some() && !self.panels.over_ui() {
                     // which handle the pointer is on - nothing over the panels, where the
                     // gizmo is behind them
                     self.hot = self.pick_handle();
@@ -901,6 +1033,7 @@ impl ApplicationHandler for Editor {
                 self.open_the_chosen_map();
                 self.make_a_map();
                 self.reopen();
+                self.back_to_the_maps();
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }

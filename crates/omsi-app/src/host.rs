@@ -201,9 +201,10 @@ pub fn screenshot(
 /// The object the middle of the view is on, if any - what a click chooses.
 ///
 /// The rule is the world's own (see `World::pick_candidates`), so a click in the editor
-/// chooses what the same click in the game's in-game editor chooses.
-pub fn pick(world: &World, eye: DVec3, forward: glam::Vec3) -> Option<i64> {
-    world.pick_candidates(eye, forward, 150.0).first().copied()
+/// chooses what the same click in the game's in-game editor chooses - and `scene` is half of
+/// that rule: the map is picked where it is drawn, and what is not drawn cannot be clicked.
+pub fn pick(world: &World, scene: &Scene, eye: DVec3, forward: glam::Vec3) -> Option<i64> {
+    world.pick_candidates(scene, eye, forward, 150.0).first().copied()
 }
 
 /// The window icon, so the editor looks like the other two programs.

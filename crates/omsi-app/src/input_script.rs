@@ -2335,8 +2335,9 @@ impl App {
                 return true;
             }
             crate::editor::Action::Pick => {
+                let Some(scene) = self.scene.as_ref() else { return false };
                 let ed = self.editor.as_mut().unwrap();
-                ed.pick(&world, eye, fwd);
+                ed.pick(&world, scene, eye, fwd);
                 ed.describe(&world)
             }
             crate::editor::Action::NextPick => {
@@ -2430,7 +2431,11 @@ impl App {
             }
             return true;
         }
-        let (Some(cam), Some(s), Some(world)) = (self.camera.as_ref(), self.surface.as_ref(), self.world.clone()) else { return true };
+        let (Some(cam), Some(s), Some(world), Some(scene)) =
+            (self.camera.as_ref(), self.surface.as_ref(), self.world.clone(), self.scene.as_ref())
+        else {
+            return true;
+        };
         let (o, d) = cursor_ray(cam, self.cursor.0, self.cursor.1, s.config.width as f32, s.config.height as f32);
         let ed = self.editor.as_mut().unwrap();
         // (the copy being edited stays the one dragged while it is under the cursor)
@@ -2440,7 +2445,7 @@ impl App {
             along > 0.0 && (p - d.as_dvec3() * along).length() < 2.5
         }).unwrap_or(false);
         if !on_added {
-            ed.pick(&world, o, d);
+            ed.pick(&world, scene, o, d);
         }
         self.editor_drag = on_added || ed.selected.is_some();
         let msg = ed.describe(&world);

@@ -1718,3 +1718,82 @@ fn fs_main(in: FsIn) -> @location(0) vec4<f32> {
     a = a * in.params.x;
     return vec4<f32>(rgb, a);
 }
+
+// ---- the outline the editor draws round a marked object ---------------------------------
+//
+// A marked instance is drawn a second time, on its own, into an off-screen mask - flat, unlit,
+// plain red - and the pass that shows the outline (`outline.wgsl`) turns the band just outside
+// those pixels into a ring. Doing it in two steps rather than by growing the geometry is what
+// makes it work on every asset: a shape drawn a little bigger needs a normal to grow along,
+// and a tree is a couple of crossed quads with no thickness at all.
+//
+// The two marks differ only in the channel written, which the showing pass reads: red under
+// the pointer, green for the object that is chosen. A channel each and not one value holding
+// 1 or 2, because the mask is eight bits a channel and 2.0 written into one clamps straight
+// back to 1 - the chosen object's ring came out the same amber as the hovered one's until
+// they were told apart this way.
+
+struct OutlineIn {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    /// The instance's per-draw parameters: x alpha multiplier, y visible, zw the
+    /// `[texcoordtransX/Y]` offset - the same the picture's own fragment shader cuts with.
+    @location(1) params: vec4<f32>,
+};
+
+@vertex
+fn vs_outline(in: VsIn) -> OutlineIn {
+    let e = draw_list[in.inst];
+    let m = model_matrix(e);
+    let pr = inst_params[e * 2u];
+    var out: OutlineIn;
+    // (the pull towards the eye that `vs_main` gives the surfaces is left out here: a couple
+    // of centimetres cannot show through a two-pixel ring, and this way the outline is the
+    // same shape as the object's own silhouette)
+    out.clip = camera.view_proj * (m * vec4<f32>(in.pos, 1.0));
+    out.uv = in.uv + pr.zw;
+    out.params = pr;
+    if (pr.y < 0.5) {
+        // invisible: collapse the triangle, as `vs_main` does
+        out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+    }
+    return out;
+}
+
+// Whether this fragment is one the material cuts away. The cut-out rendering mode (1) is the
+// one that means "the alpha decides the shape" - OMSI's `[matl_alpha] 1`, which is what a
+// tree, a fence and every wire in the world are drawn with. Without it the outline of a tree
+// would be the rectangle of the two quads its leaves are painted on.
+//
+// The rule is the picture's own, from `fs_main`, and it has to be: a `[matl_transmap]` body
+// takes its shape from the map beside its diffuse texture, and its diffuse texture's alpha is
+// usually 0 wherever that map has not filled the hole - cutting with the diffuse texture alone
+// would leave nothing of such an object at all.
+fn outline_is_cut(in: OutlineIn) -> bool {
+    let mode = material.params.x;
+    if (!(mode > 0.5 && mode < 1.5)) {
+        return false;
+    }
+    var a = textureSample(t_diffuse, s_diffuse, tex_address(in.uv)).a;
+    if (material.params.z > 0.5) {
+        let tm = sample_transmap(tex_address(in.uv - in.params.zw));
+        a = select(1.0, tm.a, material.params.w > 0.5);
+    }
+    return a < 0.5;
+}
+
+@fragment
+fn fs_outline(in: OutlineIn) -> @location(0) vec4<f32> {
+    if (outline_is_cut(in)) {
+        discard;
+    }
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_outline_chosen(in: OutlineIn) -> @location(0) vec4<f32> {
+    if (outline_is_cut(in)) {
+        discard;
+    }
+    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+}

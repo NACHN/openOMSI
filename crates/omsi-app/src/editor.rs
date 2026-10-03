@@ -79,11 +79,11 @@ pub enum Action {
 
 impl Editor {
     /// The objects in front of the camera, those nearest the middle of the view first.
-    pub fn pick(&mut self, world: &World, eye: DVec3, forward: Vec3) -> Option<i64> {
+    pub fn pick(&mut self, world: &World, scene: &omsi_render::Scene, eye: DVec3, forward: Vec3) -> Option<i64> {
         self.editing_added = None;
         // the picking itself is the world's, so a click chooses the same object here and in
         // the editor program (see `World::pick_candidates`)
-        self.candidates = world.pick_candidates(eye, forward, 150.0).into_iter().take(12).collect();
+        self.candidates = world.pick_candidates(scene, eye, forward, 150.0).into_iter().take(12).collect();
         self.next = 1;
         self.selected = self.candidates.first().copied();
         self.selected

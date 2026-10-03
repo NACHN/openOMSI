@@ -17,7 +17,7 @@ use omsi_ui::paint::Align;
 use omsi_ui::tr;
 use omsi_ui::{Color, Rect, Weight};
 use openomsi_game::host::ui::{
-    id_of, ButtonKind, Ui, ACCENT, ACCENT_2, EDGE, HOVER, PANEL, RAIL, SELECTED, TEXT, TEXT_DIM, TEXT_FAINT, TEXT_SOFT,
+    id_of, ButtonKind, Ui, ACCENT, ACCENT_2, DANGER, EDGE, HOVER, PANEL, RAIL, SELECTED, TEXT, TEXT_DIM, TEXT_FAINT, TEXT_SOFT,
 };
 
 /// The rail's width - the launcher's own, so the two programs open the same way.
@@ -113,14 +113,23 @@ pub struct State {
     /// The highlighted map, and the highlighted vehicle.
     pub map_choice: usize,
     pub vehicle_choice: usize,
-    /// Set by the Maps page's "New map": the window makes the map and opens it (or says why
-    /// it cannot yet - making one is not written).
-    pub new_map: bool,
+    /// The name the Maps page's own field holds: what its "New map" would make one called.
+    pub new_map_name: String,
+    /// Why the last "New map" could not be made, said under the field until the next try - so
+    /// a name that cannot be a folder name is answered where it was typed rather than
+    /// somewhere else on the screen.
+    pub new_map_error: Option<String>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { section: Section::Maps, map_choice: 0, vehicle_choice: 0, new_map: false }
+        State {
+            section: Section::Maps,
+            map_choice: 0,
+            vehicle_choice: 0,
+            new_map_name: String::new(),
+            new_map_error: None,
+        }
     }
 }
 
@@ -130,6 +139,8 @@ pub enum Action {
     None,
     /// Open the map at this index in `data.maps`.
     Open(usize),
+    /// Make a map with this name and open it (the window writes it - see `Window::make_a_map`).
+    NewMap(String),
     /// Quit: the window closes.
     Quit,
 }
@@ -276,16 +287,27 @@ fn list_row(ui: &mut Ui, id: &str, r: Rect, name: &str, under: &str, from_conten
 fn maps_page(ui: &mut Ui, state: &mut State, data: &Data, r: Rect) -> Option<Action> {
     let list_w = 360.0_f32.min(r.w * 0.5).max(240.0);
     let body = page_head(ui, r, Section::Maps, Some(data.maps.len()));
-    let list = Rect::new(body.x, body.y + 44.0, list_w, (body.bottom() - 96.0) - (body.y + 44.0));
-    let side = Rect::new(list.right() + 20.0, body.y, body.w - list_w - 20.0, body.bottom() - body.y);
+    let side = Rect::new(body.x + list_w + 20.0, body.y, body.w - list_w - 20.0, body.bottom() - body.y);
 
-    // the one button the list cannot be: a map that is not there yet
-    let new = Rect::new(body.x, body.y, 132.0, 32.0);
-    if ui.button("start-new-map", new, &tr("New map"), Some("add"), ButtonKind::Primary) {
-        state.new_map = true;
-    }
-
+    // the one button the list cannot be: a map that is not there yet. A map is found by its
+    // own folder, so it is asked for by name here rather than made one called "New map" and
+    // left for somebody to rename in a file browser.
     let mut action = None;
+    let field = Rect::new(body.x, body.y, (list_w - 144.0).max(96.0), 32.0);
+    ui.text_input("start-map-name", field, &mut state.new_map_name, &tr("A name for a new map"), None);
+    let new = Rect::new(field.right() + 8.0, body.y, (body.x + list_w - field.right() - 8.0).max(96.0), 32.0);
+    if ui.button("start-new-map", new, &tr("New map"), Some("add"), ButtonKind::Primary) {
+        state.new_map_error = None;
+        action = Some(Action::NewMap(state.new_map_name.clone()));
+    }
+    // why the last one could not be made, under the field that named it
+    let mut top = body.y + 44.0;
+    if let Some(why) = state.new_map_error.clone() {
+        ui.paragraph(&tr(&why), Vec2::new(body.x, body.y + 40.0), list_w + 60.0, 11.5, Weight::Regular, DANGER);
+        top = body.y + 78.0;
+    }
+    let list = Rect::new(body.x, top, list_w, (body.bottom() - 96.0) - top);
+
     let mut picked: Option<usize> = None;
     let mut opened: Option<usize> = None;
     if data.maps.is_empty() {

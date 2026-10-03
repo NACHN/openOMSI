@@ -64,6 +64,12 @@ struct Args {
     #[arg(long, short = 'm')]
     map: Option<String>,
 
+    /// Make a map and open it, as the first page's "New map" does. It is written into the
+    /// content folder (`--content`, or the game's own) and never into the installation, and
+    /// the name is a folder name, so it must not hold `\ / : * ? " < > |`.
+    #[arg(long, value_name = "name", conflicts_with = "map")]
+    new_map: Option<String>,
+
     /// Write the map's own files rather than copies under the content folder.
     #[arg(long)]
     in_place: bool,
@@ -112,6 +118,19 @@ struct Args {
     #[arg(long, value_name = "section")]
     ui_section: Option<String>,
 
+    /// With `--ui-shot`: look at this point `x y` rather than at the map's first entry point.
+    /// The crosshair can then be put over something on purpose, which is how what a click
+    /// picks - and what it marks as chosen - is looked at without a window. A map west or
+    /// south of the origin has negative coordinates, so a leading `-` is a number here.
+    #[arg(long, value_names = ["x", "y"], num_args = 2, allow_hyphen_values = true)]
+    ui_aim: Option<Vec<f64>>,
+
+    /// With `--ui-shot`: mark whatever the crosshair is on as the object *under the pointer*
+    /// rather than as the chosen one, which is what a window would do with the mouse over it.
+    /// The amber ring and the white one are then both looked at without a window.
+    #[arg(long)]
+    ui_hover: bool,
+
     /// Look from this height above the ground for `--shot-at` (m).
     #[arg(long, default_value_t = 80.0)]
     height: f64,
@@ -123,7 +142,7 @@ struct Args {
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     let root = resolve_root(&args)?;
     // Before anything is opened: tell the readers where the content folder is. A map, and every
@@ -132,6 +151,15 @@ fn main() -> Result<()> {
     // a mod would not even be listed, and a mod's copy of a tile, an object or a texture would
     // be invisible under the installation's own.
     read_content(&root);
+    // `--new-map <name>`: write a map first and open it, which is what the first page's own
+    // "New map" does. It lives here so that the one path in this program that *writes* a map
+    // can be run - and looked at - without a window, the way the other pages can.
+    if let Some(name) = args.new_map.clone() {
+        let made = omsi_editor_core::create_map(&content_dir(&args, &root), &name)
+            .with_context(|| format!("making a map called {name}"))?;
+        println!("made the map {} in {}", made.name, made.dir.display());
+        args.map = Some(made.global.to_string_lossy().into_owned());
+    }
     let destination = resolve_destination(&args, &root);
     // A script and a window together are refused rather than quietly half-honoured: the one
     // reads commands from a file and stops, the other takes them from its own console, and
@@ -163,7 +191,7 @@ fn main() -> Result<()> {
             Some(_) => Some(resolve_map(&root, args.map.as_deref(), ask)?),
             None => None,
         };
-        return ui_shot(&root, map.as_deref(), destination, args.ui_tool.as_deref(), args.ui_section.as_deref(), out);
+        return ui_shot(&root, map.as_deref(), destination, args.ui_tool.as_deref(), args.ui_section.as_deref(), args.ui_aim.as_deref(), args.ui_hover, out);
     }
 
     // which map: named, asked for here, or - when a window is going to open - asked for in
@@ -247,6 +275,8 @@ fn ui_shot(
     destination: Destination,
     mark: Option<&str>,
     section: Option<&str>,
+    aim: Option<&[f64]>,
+    hover: bool,
     out: &Path,
 ) -> Result<()> {
     openomsi_game::host::install_ui_language();
@@ -264,7 +294,20 @@ fn ui_shot(
     let opened = match &session {
         Some(_) => {
             let mut scene = renderer.new_scene();
-            let view = view::View::open(root, map.expect("a map was opened"), &renderer, &mut scene)?;
+            let mut view = view::View::open(root, map.expect("a map was opened"), &renderer, &mut scene)?;
+            // `--ui-aim`: stand over a place of the caller's choosing and look down at it,
+            // rather than at the map's first entry point - so the crosshair can be put over
+            // something on purpose, which is how what a click picks is looked at without a
+            // window
+            if let Some(at) = aim.filter(|a| a.len() >= 2) {
+                let (x, y) = (at[0], at[1]);
+                let z = view.world().ground_terrain(x, y).unwrap_or(0.0);
+                view.hover_over(glam::DVec3::new(x, y, z), 40.0);
+                // and the tiles of the new place: the view was opened around the map's entry
+                // point, and looking somewhere else means tiles that are not loaded yet - and
+                // an object that is not loaded is an object nothing can be picked on
+                view.stream(&renderer, &mut scene);
+            }
             renderer.prepare(&mut scene);
             Some((scene, view))
         }
@@ -289,7 +332,7 @@ fn ui_shot(
             // gizmo - needs an object, and the crosshair's own is the one the window would
             // have chosen from where it stands
             if let Some(name) = mark {
-                let id = openomsi_game::host::pick(view.world(), view.camera().position, view.camera().forward());
+                let id = openomsi_game::host::pick(view.world(), &scene, view.camera().position, view.camera().forward());
                 session.select(id);
                 panels.tool = match name {
                     "move" => ui::Tool::Move,
@@ -311,6 +354,11 @@ fn ui_shot(
             let (show, _) = gizmo::show_for(panels.tool, None, chosen, drawn, bubble, view.camera(), h as f32);
             let mut marks = gizmo::Marks::default();
             marks.draw(&renderer, &mut scene, &show);
+            // and the outline the window draws round the object the pointer is on and the one
+            // that is chosen, so that a shot shows the ring a window would
+            let chosen = session.selected_id().filter(|_| !hover);
+            let under = hover.then(|| session.selected_id()).flatten();
+            crate::window::mark_outline(&mut scene, view.world(), &shown, under, chosen);
             // the map goes under the panels, in the same target, before they are drawn over it
             let target = renderer.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("editor ui shot"),
@@ -643,13 +691,20 @@ fn available_maps(root: &Path) -> Vec<String> {
     names
 }
 
+/// The content folder of this run: what `--content` names, or the game's own.
+///
+/// It is where a save's copies go, and the only place a new map is written: never the
+/// installation, which nothing here may change.
+fn content_dir(args: &Args, root: &Path) -> PathBuf {
+    args.content.clone().or_else(omsi_launcher_lib::player_content_dir).unwrap_or_else(|| root.join("content"))
+}
+
 fn resolve_destination(args: &Args, root: &Path) -> Destination {
     if args.in_place {
         return Destination::InPlace;
     }
     // the folder the map was read from: an edit belongs where the game will look for it
-    let root_dir = args.content.clone().or_else(omsi_launcher_lib::player_content_dir).unwrap_or_else(|| root.join("content"));
-    Destination::Content(root_dir)
+    Destination::Content(content_dir(args, root))
 }
 
 fn banner(session: &Session) {

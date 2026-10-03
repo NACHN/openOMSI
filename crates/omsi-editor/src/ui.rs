@@ -53,7 +53,7 @@ pub enum Tool {
     Move,
     /// Drag left and right to turn what is chosen.
     Turn,
-    /// Put a copy of what is chosen where the crosshair meets the ground.
+    /// Put a copy of what is chosen where the pointer meets the ground.
     Place,
     /// Take what is under the crosshair out of the map (`Restore` puts it back).
     Delete,
@@ -111,13 +111,13 @@ impl Tool {
     /// yet. The arrows do the fine work.
     fn hint(self) -> &'static str {
         match self {
-            Tool::Select => "Left click chooses what the crosshair is on",
+            Tool::Select => "Left click chooses what the pointer is on",
             Tool::Move => "Left click puts it on the ground · drag an arrow to slide it",
             Tool::Turn => "Left click turns it to face the crosshair · drag the ring to turn it",
-            Tool::Place => "Left click puts a copy where the crosshair meets the ground",
-            Tool::Delete => "Left click takes away what the crosshair is on",
+            Tool::Place => "Left click puts a copy where the pointer meets the ground",
+            Tool::Delete => "Left click takes away what the pointer is on",
             Tool::Raise => "Left click raises the ground by the step · Shift lowers it",
-            Tool::Flatten => "Left click levels the ground to where the crosshair is",
+            Tool::Flatten => "Left click levels the ground to where the pointer is",
         }
     }
 
@@ -207,6 +207,12 @@ pub struct Panels {
     /// A map the first page was asked to open. The window reads it, opens the session on it
     /// and draws the editing panels from then on.
     pub open_map: Option<std::path::PathBuf>,
+    /// A new map the first page asked for, by the name that was typed: the window writes it
+    /// and opens it (`Window::make_a_map`).
+    pub new_map: Option<String>,
+    /// Set by the top bar's way back: the window shows the page that lists the maps again,
+    /// keeping the session it has (`Window::back_to_the_maps`).
+    pub back: bool,
 }
 
 impl Default for Panels {
@@ -228,6 +234,7 @@ impl Panels {
             log: vec![
                 "Commands work here as they did in the terminal: help lists them.".to_string(),
                 "The map is flown with W A S D, Q and E, the right button turns the view.".to_string(),
+                "`maps` goes back to the list, to open another one.".to_string(),
             ],
             variants: Vec::new(),
             variants_for: None,
@@ -238,6 +245,8 @@ impl Panels {
             maps: Vec::new(),
             vehicles: Vec::new(),
             open_map: None,
+            new_map: None,
+            back: false,
         }
     }
 
@@ -254,10 +263,27 @@ impl Panels {
         self.page.vehicle_choice = 0;
     }
 
-    /// Set by the Maps page's "New map"; the window reads it and makes the map (or says that
-    /// making one is not written yet).
-    pub fn take_new_map(&mut self) -> bool {
-        std::mem::take(&mut self.page.new_map)
+    /// Set by the Maps page's "New map": the name to make a map by. The window writes the map
+    /// and opens it, or says why it could not be made with [`Panels::new_map_failed`].
+    pub fn take_new_map(&mut self) -> Option<String> {
+        self.new_map.take()
+    }
+
+    /// A map could not be made. It is said under the field that named it, because that is
+    /// where the name that failed is - and the name is still there to be changed.
+    pub fn new_map_failed(&mut self, why: String) {
+        self.page.new_map_error = Some(why);
+    }
+
+    /// Enter in the first page's name field: what the "New map" button beside it does.
+    pub fn make_the_new_map(&mut self) {
+        self.page.new_map_error = None;
+        self.new_map = Some(self.page.new_map_name.clone());
+    }
+
+    /// The top bar's way back was clicked: show the page that lists the maps.
+    pub fn take_back(&mut self) -> bool {
+        std::mem::take(&mut self.back)
     }
 
     /// Open one of the first page's three sections, as a click on the rail would - what
@@ -389,6 +415,7 @@ impl Panels {
         // the fields are taken apart so that the toolkit and the lists it draws can be
         // borrowed at the same time - the page reads them both
         let mut open = None;
+        let mut made = None;
         let mut quit = false;
         {
             let Panels { ui, page, maps, vehicles, .. } = self;
@@ -402,11 +429,15 @@ impl Panels {
             match crate::start::draw(ui, page, &data, w, h) {
                 crate::start::Action::None => {}
                 crate::start::Action::Open(i) => open = maps.get(i).map(|m| m.cfg.clone()),
+                crate::start::Action::NewMap(name) => made = Some(name),
                 crate::start::Action::Quit => quit = true,
             }
         }
         if let Some(cfg) = open {
             self.open_map = Some(cfg);
+        }
+        if let Some(name) = made {
+            self.new_map = Some(name);
         }
         if quit {
             self.quit = true;
@@ -476,15 +507,23 @@ impl Panels {
         self.ui.solid(r);
 
         let name = session.doc().global().name.clone();
-        self.ui.text_in(&name, Rect::new(16.0, r.y, 320.0, r.h), 14.0, Weight::Bold, TEXT, Align::Left);
+
+        // the way back to the page that asks which map. An editor whose only way off a map is
+        // closing the window is a trap, and the window is where the list is - a terminal in
+        // front of it stopped being the way in.
+        let mid = r.center().y;
+        if self.ui.icon_button("top-maps", Vec2::new(28.0, mid), 16.0, "arrow_back", &tr("Back to the maps")) {
+            self.back = true;
+        }
+
+        self.ui.text_in(&name, Rect::new(52.0, r.y, 320.0, r.h), 14.0, Weight::Bold, TEXT, Align::Left);
         let named = self.ui.width(&name, 14.0, Weight::Bold);
         let file = session.doc().map_cfg().to_string_lossy().to_string();
         self.ui
-            .text_in(&file, Rect::new(16.0 + named + 12.0, r.y, 560.0, r.h), 11.5, Weight::Regular, TEXT_FAINT, Align::Left);
+            .text_in(&file, Rect::new(52.0 + named + 12.0, r.y, 560.0, r.h), 11.5, Weight::Regular, TEXT_FAINT, Align::Left);
 
         // from the right: save, redo, undo, then what a save would do and what is waiting
         let mut x = r.right() - 16.0;
-        let mid = r.center().y;
         let dirty = session.doc().dirty_tiles().len();
         let can_save = dirty > 0;
         x -= 104.0;
@@ -639,7 +678,7 @@ impl Panels {
         if self.ui.button("ins-move-aim", a, "Move to aim", None, ButtonKind::Normal) {
             match aim {
                 Some(at) => self.act(session, |s| s.move_selected_on_the_ground(at)),
-                None => self.say("The crosshair is not on any ground."),
+                None => self.say("The pointer is not on any ground."),
             }
         }
         let b = Rect::new(a.right() + 8.0, y, bw, 28.0);
@@ -651,7 +690,7 @@ impl Panels {
                     let deg = dx.atan2(dy).to_degrees();
                     self.act(session, |s| s.turn_selected_to(deg));
                 }
-                None => self.say("The crosshair is not on any ground."),
+                None => self.say("The pointer is not on any ground."),
             }
         }
         y += 34.0;
@@ -697,8 +736,8 @@ impl Panels {
         let mut x = 14.0;
 
         let aim = match info.aim {
-            Some(p) => format!("{}  {}, {}, {}", tr("crosshair"), pos(p.x), pos(p.y), pos(p.z)),
-            None => "crosshair is not on the ground".to_string(),
+            Some(p) => format!("{}  {}, {}, {}", tr("pointer"), pos(p.x), pos(p.y), pos(p.z)),
+            None => "pointer is not on the ground".to_string(),
         };
         x += self.status_text(x, mid, &aim, if info.aim.is_some() { TEXT_SOFT } else { TEXT_FAINT }) + 18.0;
         let tile = openomsi_game::host::tile_of(view.camera().position);
@@ -802,10 +841,18 @@ impl Panels {
 
     /// One line typed at the console: the prompt the editor always had, now inside the window.
     pub fn run(&mut self, session: &mut Session, line: &str) {
-        if line.trim().is_empty() {
+        let line = line.trim();
+        if line.is_empty() {
             return;
         }
-        self.say(format!("> {}", line.trim()));
+        self.say(format!("> {line}"));
+        // `maps`, like `quit`, is about the program rather than the map, so it is answered
+        // here rather than in the terminal's own command set - which has no list of maps to
+        // go back to and no window to show one in. The top bar's arrow does the same.
+        if line.eq_ignore_ascii_case("maps") {
+            self.back = true;
+            return;
+        }
         match repl::run_line(session, line) {
             Ok(o) => {
                 self.say(o.message);

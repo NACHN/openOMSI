@@ -633,6 +633,13 @@ pub struct GpuMesh {
     pub ranges: Vec<(u32, u32, u32)>,
     pub bounds_center: Vec3,
     pub bounds_radius: f32,
+    /// The mesh's own box, in its own frame.
+    ///
+    /// The sphere above is what culling and the editor's selection mark ask for; this is what
+    /// a ray asks for - "is the pointer over this thing" wants the shape, and a sphere round a
+    /// long wall answers yes from three metres off either end of it.
+    pub bounds_min: Vec3,
+    pub bounds_max: Vec3,
     /// Back faces are culled (a content mesh, see `MeshData::one_sided`).
     pub one_sided: bool,
     /// Source asset for the optional draw-cost audit.
@@ -1005,6 +1012,19 @@ pub struct Instance {
     pub ordered: bool,
 }
 
+/// Why an instance is outlined: what the editor has pointed at, or what it has chosen.
+///
+/// The two are told apart only in the colour of the ring - amber under the pointer, white for
+/// what is chosen (see `outline.wgsl`) - but they are two because a chosen object under the
+/// pointer has to read as chosen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mark {
+    /// The object the pointer is over.
+    Hover,
+    /// The object that is chosen: what the tools act on.
+    Chosen,
+}
+
 pub struct Scene {
     pub meshes: Vec<GpuMesh>,
     pub textures: Vec<GpuTexture>,
@@ -1043,6 +1063,13 @@ pub struct Scene {
     sky_bind_group: Option<wgpu::BindGroup>,
     /// HUD images drawn after the scene: (texture, rect in pixels x0,y0,x1,y1).
     pub overlays: Vec<(TextureId, [f32; 4])>,
+    /// The instances to outline, by instance index, drawn round whichever of them the editor
+    /// has pointed at or chosen. Set every frame - an empty list draws nothing and costs
+    /// nothing, which is what the game leaves it as.
+    ///
+    /// The instance and not the object: an object is several instances (one per material
+    /// slot), and outlining them all is what makes one ring round the whole object.
+    pub outline: Vec<(u32, Mark)>,
     /// Overlay textures that hold premultiplied alpha (drawn by `omsi-ui`, e.g. the
     /// navigator) rather than straight alpha.
     pub premultiplied: std::collections::HashSet<TextureId>,
@@ -1261,6 +1288,16 @@ pub struct Renderer {
     sky_mesh: (wgpu::Buffer, wgpu::Buffer, u32),
     overlay_pipeline: wgpu::RenderPipeline,
     overlay_layout: wgpu::BindGroupLayout,
+    /// The editor's outline: the marked instances drawn into a mask of their own - amber ones
+    /// first, the chosen one over them - and then the ring round them, over the picture.
+    /// Nothing is drawn through either of these while `Scene::outline` is empty.
+    outline_mark_pipelines: [wgpu::RenderPipeline; 2],
+    outline_show_pipeline: wgpu::RenderPipeline,
+    outline_layout: wgpu::BindGroupLayout,
+    outline_buf: wgpu::Buffer,
+    outline_sampler: wgpu::Sampler,
+    /// The mask of the size last drawn into: its view and the bind group to read it with.
+    outline_target: Option<(u32, u32, wgpu::TextureView, wgpu::BindGroup)>,
     sampler: wgpu::Sampler,
     camera_buf: wgpu::Buffer,
     white_texture: GpuTexture,
@@ -1536,6 +1573,12 @@ pub const LAMP_CODE_STRIDE: u32 = 64;
 /// geometry pass or a full normal/material buffer just for water.
 const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// The mask the editor's outline is drawn into (`Scene::outline`): red where the pointer is,
+/// green where the object that is chosen is, nothing where neither. A texture of its own
+/// rather than a channel of `MASK_FORMAT`, which the enhanced path's own shader fills and its
+/// post passes consume; this one has to be plain white wherever a marked object covers a pixel.
+const OUTLINE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// The colour targets of a pipeline drawing into `format`: in the enhanced pass (the only
 /// one drawing into `HDR_FORMAT` with these pipelines) with the screen mask beside it,
@@ -2328,6 +2371,127 @@ impl Renderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
         };
+        // The editor's outline (see `Scene::outline`): the marked instances drawn flat into a
+        // mask, and then the ring round them over the finished picture.
+        //
+        // Two mark pipelines rather than one taking the value in a uniform: what a pixel of
+        // the mask holds is which list the instance was drawn from, and the encoders already
+        // know which list that is.
+        let outline_mark = |entry: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("outline mark"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_outline"),
+                    buffers: &[vertex_layout.clone()],
+                    compilation_options: Default::default(),
+                },
+                // no culling: a sign is one quad and a tree is two, and the ring is wanted
+                // round the shape rather than round the half of it facing the camera
+                primitive: one_sided_primitive(false),
+                // and no depth: an outline says where the object *is*, so one behind a
+                // building still says it is chosen. The pass has no depth attachment either,
+                // which is also what keeps it out of the picture's own.
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: OUTLINE_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let outline_mark_pipelines = [outline_mark("fs_outline"), outline_mark("fs_outline_chosen")];
+        let outline_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("outline"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let outline_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("outline"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("outline.wgsl").into()),
+        });
+        let outline_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("outline"),
+            bind_group_layouts: &[Some(&outline_layout)],
+            immediate_size: 0,
+        });
+        let outline_show_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("outline"),
+            layout: Some(&outline_pl),
+            vertex: wgpu::VertexState {
+                module: &outline_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &outline_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    // the ring's own premultiplied colour: it is a light laid over the
+                    // picture rather than a shape painted in it
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let outline_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("outline params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let outline_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("outline"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let make = |format: wgpu::TextureFormat,
                     fs: &str,
                     blend: Option<wgpu::BlendState>,
@@ -3945,6 +4109,12 @@ impl Renderer {
             sky_mesh,
             overlay_pipeline,
             overlay_layout,
+            outline_mark_pipelines,
+            outline_show_pipeline,
+            outline_layout,
+            outline_buf,
+            outline_sampler,
+            outline_target: None,
             sampler,
             camera_buf,
             white_texture,
@@ -4099,6 +4269,7 @@ impl Renderer {
             shadow_bind_group: None,
             sky_bind_group: None,
             overlays: Vec::new(),
+            outline: Vec::new(),
             premultiplied: Default::default(),
             overlay_res: Vec::new(),
             dirty: true,
@@ -6931,6 +7102,54 @@ impl Renderer {
         }
     }
 
+    /// The mask the editor's outline is drawn into, at the size the picture was drawn at: made
+    /// when that size is new, kept until another one is asked for (a window resize).
+    fn outline_target(&mut self, width: u32, height: u32) -> (u32, u32, wgpu::TextureView, wgpu::BindGroup) {
+        let (w, h) = (width.max(1), height.max(1));
+        if let Some((mw, mh, view, bg)) = self.outline_target.as_ref() {
+            if (*mw, *mh) == (w, h) {
+                return (*mw, *mh, view.clone(), bg.clone());
+            }
+        }
+        let view = self
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("outline mask"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: OUTLINE_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("outline"),
+            layout: &self.outline_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.outline_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.outline_buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.outline_target = Some((w, h, view.clone(), bg.clone()));
+        (w, h, view, bg)
+    }
+
     /// Upload this frame's smoke particles, farthest first (they are blended over each other).
     fn prepare_smoke(&self, scene: &mut Scene, eye: DVec3) {
         let ro = scene.render_origin;
@@ -8510,6 +8729,43 @@ impl Renderer {
             }
         }
         stage(self, "items", "mirror.items");
+        // The editor's outline (see `Scene::outline`): the marked instances get entries of
+        // their own at the tail of the frame's draw list. The per-draw entries they need are
+        // already in the buffers the picture is drawn from (`Instance::base`), so what is
+        // added here is a list pointing at them - and the list is built before it is uploaded,
+        // so its buffer is grown to hold them.
+        //
+        // The amber ones first and the chosen one over them, so that a pixel of the mask
+        // holds the strongest mark there is: that is what makes a chosen object still read as
+        // chosen under the pointer, which is the whole reason the mask holds two values.
+        let outline_marked = with_overlays && !scene.outline.is_empty();
+        let mut outline_draws: Vec<OutlineDraw> = Vec::new();
+        if outline_marked {
+            for (wanted, chosen) in [(Mark::Hover, false), (Mark::Chosen, true)] {
+                for &(instance, mark) in &scene.outline {
+                    if mark != wanted {
+                        continue;
+                    }
+                    let Some(inst) = scene.instances.get(instance as usize) else { continue };
+                    let Some(mesh) = scene.meshes.get(inst.mesh as usize) else { continue };
+                    for &(first, count, slot) in &mesh.ranges {
+                        // the range's own slot, not the range's place in the list: a range the
+                        // loader dropped for an unused texture leaves its slot's entry where it
+                        // was (`ranges[slot]`, and `inst.materials[slot]` with it)
+                        let material = inst.materials.get(slot as usize).copied().unwrap_or(0) as u32;
+                        outline_draws.push(OutlineDraw {
+                            entry: list.len() as u32,
+                            mesh: inst.mesh as u32,
+                            first,
+                            count,
+                            material,
+                            chosen,
+                        });
+                        list.push(inst.base + slot);
+                    }
+                }
+            }
+        }
         self.upload_draw_list(scene, &list);
         stage(self, "upload", "mirror.upload");
         // OMSI_NO_BUNDLES=1 records the main pass directly, for comparison. (Splitting the
@@ -8554,6 +8810,62 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("picture"),
             });
+        // The editor's outline, the mask half: every marked instance drawn flat into a texture
+        // of its own, which the last pass of the frame turns into a ring (see `Scene::outline`
+        // and `outline.wgsl`). Its own pass rather than a few draws in the picture's: the mask
+        // has one channel and no depth, and a marked object is drawn whatever stands in front
+        // of it, which is not something the picture's pass can do.
+        let mut outline_mask: Option<wgpu::BindGroup> = None;
+        if outline_marked {
+            if let Some(camera_bg) = scene.camera_bind_group.as_ref() {
+                let (_w, _h, mask_view, mask_bg) = self.outline_target(width, height);
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("outline mask"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &mask_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: pass_timer(tset.as_ref(), &mut timed, "outline mark"),
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_bind_group(0, camera_bg, &[]);
+                    // `None` and not a mark: the first draw has to set the pipeline whatever
+                    // kind it is - a sentinel of `false` would equal a mark under the pointer,
+                    // and the draw that followed it went out with no pipeline at all (which
+                    // wgpu answers by throwing the whole frame's commands away: the editor's
+                    // picture went black the moment the pointer came near an object)
+                    let (mut pipe, mut mesh, mut material): (Option<bool>, u32, u32) = (None, u32::MAX, u32::MAX);
+                    for d in &outline_draws {
+                        if Some(d.chosen) != pipe {
+                            pass.set_pipeline(&self.outline_mark_pipelines[d.chosen as usize]);
+                            pipe = Some(d.chosen);
+                        }
+                        if d.mesh != mesh {
+                            let m = &scene.meshes[d.mesh as usize];
+                            pass.set_vertex_buffer(0, m.vertex_buf.slice(..));
+                            pass.set_index_buffer(m.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                            mesh = d.mesh;
+                        }
+                        if d.material != material {
+                            pass.set_bind_group(1, Some(&scene.materials[d.material as usize].bind_group), &[]);
+                            material = d.material;
+                        }
+                        // one instance a draw: each entry of the list is one of the instance's
+                        // own, and what the vertex shader reads is `draw_list[instance_index]`
+                        pass.draw_indexed(d.first..d.first + d.count, 0, d.entry..d.entry + 1);
+                    }
+                }
+                outline_mask = Some(mask_bg);
+            }
+        }
         for cascade in [0usize, 1] {
             if !draw_shadows || (cascade == 1 && !redraw_far) {
                 continue;
@@ -9282,6 +9594,40 @@ impl Renderer {
             self.glass_live = Some(k);
             self.show_glass_behind(scene, k);
         }
+        // The editor's outline, the showing half: the ring round the marks, laid over the
+        // picture that is finished by now - after the tone mapping and the HUD's own scale, so
+        // that what is outlined is not graded along with the world it stands in.
+        if let Some(mask_bg) = outline_mask.as_ref() {
+            // one mask texel, and one picture pixel, in the uv the shader works in (see
+            // `outline.wgsl`)
+            let params = [
+                1.0 / width.max(1) as f32,
+                1.0 / height.max(1) as f32,
+                1.0 / full_w.max(1) as f32,
+                1.0 / full_h.max(1) as f32,
+            ];
+            self.queue.write_buffer(&self.outline_buf, 0, bytemuck::cast_slice(&params));
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("outline"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    // loaded, not cleared: the ring is a light over the finished picture
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: pass_timer(tset.as_ref(), &mut timed, "outline"),
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.outline_show_pipeline);
+            pass.set_bind_group(0, mask_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
         stage(self, "encode", "mirror.encode");
         // Turning the recorded passes into Metal commands is the costliest CPU step of a
         // frame (wgpu checks every draw): the shadow maps and the prepass are finished on
@@ -9517,6 +9863,8 @@ fn make_mesh(device: &wgpu::Device, queue: &wgpu::Queue, data: &MeshData) -> Gpu
         ranges: data.ranges.clone(),
         bounds_center: center,
         bounds_radius: (hi - center).length(),
+        bounds_min: lo,
+        bounds_max: hi,
         one_sided: data.one_sided,
         source: None,
     }
@@ -10186,6 +10534,24 @@ struct Batch {
     count: u32,
     material: u32,
     instances: std::ops::Range<u32>,
+}
+
+/// One draw of the editor's outline mask: one mesh slot of one marked instance, and where that
+/// instance's per-draw entry ended up in the frame's draw list (`Scene::outline`).
+///
+/// Not batched like the picture's draws, and not needing to be: an outline is drawn round one
+/// or two objects, which is a handful of meshes however complex the object is.
+struct OutlineDraw {
+    /// The position in the draw list the instance's entry was put at - what the vertex shader
+    /// reads as `draw_list[instance_index]`.
+    entry: u32,
+    mesh: u32,
+    /// The mesh's vertex range for this slot (`GpuMesh::ranges`).
+    first: u32,
+    count: u32,
+    material: u32,
+    /// The chosen object rather than the one under the pointer: which value the mask holds.
+    chosen: bool,
 }
 
 /// Turn draw items into batches, appending their entries to `list`. `sort`: the order does
