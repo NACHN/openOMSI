@@ -159,6 +159,11 @@ fn undo_puts_the_session_back_to_clean() {
     let label = h.undo(&mut doc).unwrap().expect("something to take back");
     assert_eq!(label, "Move object 100 (1, 0, 0 m)");
     assert!(!doc.is_dirty(), "undoing left the session dirty");
+    // and the object is not even *listed* as edited any more (`Document::set_edit` drops an
+    // edit that is untouched). A window that draws what has changed, and only what has
+    // changed, therefore learns nothing from that list about what has just been put back -
+    // it has to keep its own record of what it drew (`omsi-editor`'s `View::sync`).
+    assert_eq!(doc.edits().count(), 0, "the undone edit is still listed");
     // and so a save writes nothing at all
     assert!(doc.save().unwrap().is_empty());
     assert!(!f.written("maps/Tiny/tile_0_0.map").exists());

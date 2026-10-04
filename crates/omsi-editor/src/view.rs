@@ -13,7 +13,7 @@ use anyhow::Result;
 use glam::{DVec3, Mat4};
 use hashbrown::HashSet;
 use openomsi_game::host::{self, LoadStats, TileGpu, World};
-use omsi_editor_core::{ObjectEdit, Session};
+use omsi_editor_core::{ObjectEdit, Session, TileId};
 use omsi_render::{Camera, Lighting, Renderer, Scene};
 use std::path::Path;
 
@@ -171,18 +171,33 @@ impl Shown {
 
 impl View {
     /// Put what the session has changed on the screen: an object it moved or took away, a copy
-    /// it placed, the ground it shaped.
+    /// it placed, the ground it shaped - and, just as much, what it has put *back*, so that
+    /// taking a change back leaves the picture as it leaves the map.
     ///
     /// Drawing is the game's own - `apply_object_edit` is the very call the in-game editor
     /// makes while dragging an object - so what the modder sees here is what the game will
     /// show. Nothing is done for a change that is already on the screen.
     pub fn sync(&mut self, session: &Session, shown: &mut Shown, renderer: &Renderer, scene: &mut Scene) {
-        for (id, edit) in session.doc().edits() {
+        // An edit that has been taken back to nothing leaves the map's list of edits
+        // altogether (see `Document::set_edit`), so that list is not enough on its own: the
+        // object whose move was just undone is simply *absent* from it, and walking it alone
+        // would leave the object standing where the undone change put it - the picture would
+        // say the undo had not happened at all. The ids the view is still holding are
+        // therefore walked as well, and one the map no longer lists is put back where its
+        // record has said all along that it stands.
+        let edits: Vec<(i64, ObjectEdit)> = session.doc().edits().collect();
+        let listed: HashSet<i64> = edits.iter().map(|&(id, _)| id).collect();
+        for &(id, edit) in &edits {
             if shown.objects.get(&id) == Some(&edit) {
                 continue;
             }
             shown.objects.insert(id, edit);
             self.world.apply_object_edit(renderer, scene, id, edit);
+        }
+        let put_back: Vec<i64> = shown.objects.keys().copied().filter(|id| !listed.contains(id)).collect();
+        for id in put_back {
+            shown.objects.remove(&id);
+            self.world.apply_object_edit(renderer, scene, id, ObjectEdit::default());
         }
         // the copies placed this session: put down once, then moved and taken back as the
         // session says. A copy's edit is on the copy itself, so it never comes round through
@@ -216,14 +231,28 @@ impl View {
                 self.world.remove_helper_object(renderer, scene, p.gpu);
             }
         }
-        // ground is part of a tile's mesh, so a shaped tile is read again rather than nudged
-        for (id, t) in session.doc().changed_ground() {
+        // ground is part of a tile's mesh, so a shaped tile is read again rather than nudged -
+        // and a tile whose ground has been put back exactly is not "changed" any more at all
+        // (a change is measured against the hash the map was read with, see
+        // `Document::ground_is_dirty`), so it would drop out of the list below and go on being
+        // drawn shaped. It is read again for the same reason an object is put back from its
+        // record above: what is on the screen is what the map now says, not what was last done
+        // to it.
+        let ground: Vec<(TileId, &omsi_map::Terrain)> = session.doc().changed_ground().collect();
+        let shaped: HashSet<TileId> = ground.iter().map(|&(id, _)| id).collect();
+        for &(id, t) in &ground {
             let h = ground_hash(t);
             if shown.ground.get(&id) == Some(&h) {
                 continue;
             }
             shown.ground.insert(id, h);
             self.world.terrain_edits.lock().insert(id, t.clone());
+            self.reground(renderer, scene, id);
+        }
+        let unshaped: Vec<TileId> = shown.ground.keys().copied().filter(|id| !shaped.contains(id)).collect();
+        for id in unshaped {
+            shown.ground.remove(&id);
+            self.world.terrain_edits.lock().remove(&id);
             self.reground(renderer, scene, id);
         }
     }
