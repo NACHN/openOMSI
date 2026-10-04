@@ -22303,6 +22303,19 @@ _version: 2
   zh: "随云量"
   zh-tw: "隨雲量"
   ja: "雲量に応じて"
+"Cloud quality":
+  de: "Wolkenqualität"
+  fr: "Qualité des nuages"
+  es: "Calidad de las nubes"
+  it: "Qualità delle nuvole"
+  nl: "Wolkenkwaliteit"
+  pt: "Qualidade das nuvens"
+  pt-pt: "Qualidade das nuvens"
+  ru: "Качество облаков"
+  pl: "Jakość chmur"
+  zh: "云质量"
+  zh-tw: "雲品質"
+  ja: "雲の品質"
 
 
 "Precipitation":

@@ -85,6 +85,9 @@ fn shape_texel(u: f32, v: f32) -> [f32; 3] {
     let perlin = fbm(c, 7, 4.0, value_noise);
     let cells = fbm(c, 4, 8.0, worley);
     let r = (1.0 + (perlin - 1.0) * 0.9) * (1.0 + (cells - 1.0) * 0.7);
+    // How much cover a heap needs before it appears (stored + 1): a coarse field, so that it
+    // says which stretches of the sky are thick and which are thin instead of cutting one
+    // heap into several.
     let g = 0.625 * fbm(c, 3, 15.0, worley) + 0.25 * fbm(c, 3, 19.0, worley) + 0.125 * fbm(c, 3, 23.0, worley) - 1.0;
     let b = 1.0 - fbm([c[0] + 0.5, c[1] + 0.5, c[2] + 0.5], 4, 9.0, worley);
     [r, g + 1.0, b]
@@ -188,6 +191,141 @@ pub fn detail_volume() -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `cargo test -p omsi-render cloud_report -- --ignored --nocapture`: what the shape
+    /// map holds, and how much of the sky each of the tests for "there is a cloud here"
+    /// calls a cloud - the one the sky itself uses (`cloud_sigma` over the whole layer,
+    /// which is what is drawn) against the single slice a shadow of it on the ground
+    /// reads, whose fraction of the ground has to match the sky's.
+    #[test]
+    #[ignore]
+    fn cloud_report() {
+        const SIGMA: f32 = 0.035; // sky_enhanced.wgsl CLOUD_SIGMA
+        let (bottom, top) = (1400.0f32, 2800.0f32);
+        let n = SHAPE_SIZE as usize;
+        let mut texels = Vec::new();
+        for y in (0..n).step_by(2) {
+            for x in (0..n).step_by(2) {
+                texels.push(((x as f32 + 0.5) / n as f32, (y as f32 + 0.5) / n as f32));
+            }
+        }
+        let shapes: Vec<[f32; 3]> = texels.iter().map(|(u, v)| shape_texel(*u, *v)).collect();
+        let stat = |name: &str, f: &dyn Fn([f32; 3]) -> f32| {
+            let mut v: Vec<f32> = shapes.iter().map(|s| f(*s)).collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let q = |p: f32| v[((v.len() - 1) as f32 * p) as usize];
+            println!("  {name:<16} min {:>6.3}  p10 {:>6.3}  median {:>6.3}  p90 {:>6.3}  max {:>6.3}", v[0], q(0.1), q(0.5), q(0.9), v[v.len() - 1]);
+        };
+        println!("shape map, {} texels:", shapes.len());
+        stat("r (the heap)", &|s| s[0]);
+        stat("lo = g-1", &|s| s[1] - 1.0);
+        stat("b (rounding)", &|s| s[2]);
+
+        // (the billows' sideways carry of a heap is left out: it moves the map lookup by a
+        // few texels, which shuffles which heap is where without changing the shares below)
+        // The heap's own profile at a rise of `alt` metres above the layer's base
+        // (sky_enhanced.wgsl): measured in metres, with the layer's base and top only
+        // clipping it - not a fraction of the layer, which stretched a heap taller every
+        // time a weather raised the top.
+        let band = top - bottom;
+        let heap = |s: [f32; 3], alt: f32| {
+            let h = alt / (1400.0 * (0.6 + 0.7 * s[2]));
+            let n = h * h * (0.30 + 0.35 * s[2]) + (1.0 - h.min(1.0)).powi(16);
+            let lo = s[1] - 1.0;
+            (s[0] - n - lo) / (1.0 - lo).max(1e-3)
+        };
+        // the layer's bounds: a heap fades in over the band above its base and is cut off
+        // over the last of the layer
+        let clip = |alt: f32| linear(0.0, 200.0, alt) * (1.0 - linear(band * 0.88, band, alt));
+        let erosion = |alt: f32, m: f32, u: f32, v: f32| {
+            let dl = detail_texel(u, v, alt / 2000.0);
+            m - dl * smoothstep(1.0, 0.5, m) * 0.3
+        };
+        // what coverage a weather's cover needs for the sky to come out at the share of
+        // cloud the type means (the mapping is steep, so it is read off here rather than
+        // guessed at)
+        if omsi_cfg::env::var_os("CLOUD_SWEEP").is_some() {
+            // How open the sky still is at each coverage: "any cloud" (a tenth of the light
+            // taken) and "opaque" (nine tenths). The gap between the two is the pale rim; an
+            // open sky at a closed cover is what this is read for.
+            println!("the sky against `cloud_coverage`'s value:");
+            let mut c = 0.44f32;
+            while c <= 1.62001 {
+                let (mut sky, mut solid) = (0usize, 0usize);
+                for (i, s) in shapes.iter().enumerate() {
+                    let (u, v) = texels[i];
+                    let mut od = 0.0f32;
+                    for k in 0..24 {
+                        let alt = (k as f32 + 0.5) / 24.0 * band;
+                        let mm = heap(*s, alt);
+                        if mm + c - 1.0 <= 0.0 {
+                            continue;
+                        }
+                        let me = erosion(alt, mm, u, v);
+                        let d = smoothstep(0.0, 0.12, me + c - 1.0) * clip(alt);
+                        od += d * SIGMA * band / 24.0;
+                    }
+                    let t = 1.0 - (-od).exp();
+                    if t > 0.1 {
+                        sky += 1;
+                    }
+                    if t > 0.9 {
+                        solid += 1;
+                    }
+                }
+                let n = shapes.len() as f32;
+                println!("  coverage {c:.3} -> any {:>4.0}%   opaque {:>4.0}%", 100.0 * sky as f32 / n, 100.0 * solid as f32 / n);
+                c += 0.06;
+            }
+            return;
+        }
+        for cover in [0.35f32, 0.55, 0.75] {
+            for field in [-0.125f32, 0.0, 0.125] {
+                let cov = (0.408 + cover * 0.2975 + 0.10 * cover.powi(8) + field * 0.16 * (1.0 - cover.powi(4))).clamp(0.0, 1.0);
+                let (mut slice, mut eroded, mut sky) = (0usize, 0usize, 0usize);
+                for (i, s) in shapes.iter().enumerate() {
+                    let (u, v) = texels[i];
+                    // (the height a shadow of the layer on the ground reads: 300 m up)
+                    let alt = 300.0f32;
+                    let m = heap(*s, alt);
+                    if m + cov - 1.0 > 0.0 {
+                        slice += 1;
+                        if erosion(alt, m, u, v) + cov - 1.0 > 0.0 {
+                            eroded += 1;
+                        }
+                    }
+                    let mut od = 0.0f32;
+                    for k in 0..24 {
+                        let alt = (k as f32 + 0.5) / 24.0 * band;
+                        let mm = heap(*s, alt);
+                        if mm + cov - 1.0 <= 0.0 {
+                            continue;
+                        }
+                        let me = erosion(alt, mm, u, v);
+                        let d = smoothstep(0.0, 0.12, me + cov - 1.0) * clip(alt);
+                        od += d * SIGMA * band / 24.0;
+                    }
+                    if 1.0 - (-od).exp() > 0.1 {
+                        sky += 1;
+                    }
+                }
+                let t = shapes.len() as f32;
+                println!(
+                    "cover {cover:.2} field {field:+.3} -> coverage {cov:.3}:  one slice {:>4.0}%   slice+erosion {:>4.0}%   the sky itself {:>4.0}%",
+                    100.0 * slice as f32 / t, 100.0 * eroded as f32 / t, 100.0 * sky as f32 / t
+                );
+            }
+        }
+    }
+
+    fn linear(a: f32, b: f32, v: f32) -> f32 {
+        ((v - a) / (b - a)).clamp(0.0, 1.0)
+    }
+
+    fn smoothstep(a: f32, b: f32, v: f32) -> f32 {
+        let t = ((v - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
 
     #[test]
     fn noise_tiles_and_spans_its_range() {

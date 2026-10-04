@@ -174,6 +174,9 @@ struct Probe {
 /// degree as a 1600-pixel-wide picture has pixels at half its size (at 512 the clouds'
 /// edges stood in blocks of three or four pixels).
 const SKY_CUBE_SIZE: u32 = 1024;
+/// The steps a ray takes through the cloud layer at the highest quality setting (the number
+/// `sky_enhanced.wgsl` was tuned at; the shader mirrors it as `CLOUD_STEPS_FULL`).
+const CLOUD_STEPS_FULL: u32 = 192;
 /// Redraw rounds of a sky cube face: each starts the clouds' steps elsewhere, and the
 /// rounds are averaged (all of them at once for a picture on its own or a new sky).
 const SKY_CUBE_ROUNDS: u32 = 8;
@@ -1817,6 +1820,8 @@ pub struct Renderer {
     cloud_shape_view: wgpu::TextureView,
     cloud_detail_view: wgpu::TextureView,
     cloud_sampler: wgpu::Sampler,
+    /// `RenderOptions::cloud_steps`: read when the enhanced uniform is written.
+    cloud_steps: u32,
     sky_mesh: (wgpu::Buffer, wgpu::Buffer, u32),
     overlay_pipeline: wgpu::RenderPipeline,
     overlay_layout: wgpu::BindGroupLayout,
@@ -2018,6 +2023,14 @@ pub struct RenderOptions {
     pub anisotropy: u16,
     /// Sun shadow map size per cascade (1024, 2048, 4096).
     pub shadow_size: u32,
+    /// The steps a ray takes through the cloud layer, 192 at the top setting: the volumetric
+    /// clouds' own quality. Fewer are cheaper, and the maps are then read no finer than the
+    /// steps that walk them (`sky_enhanced.wgsl`), so a low setting is a softer cloud rather
+    /// than an aliased one.
+    pub cloud_steps: u32,
+    /// The enhanced sky's cube, a face (512 or 1024): the sky and its clouds are drawn into
+    /// it and looked up from there, so this is the resolution a cloud's own edge is seen at.
+    pub sky_cube_size: u32,
     /// Screen-space ambient occlusion.
     pub ssao: bool,
     /// The 3D picture of the window drawn at this fraction of its size and scaled up
@@ -2059,6 +2072,8 @@ impl Default for RenderOptions {
             msaa: MSAA,
             anisotropy: 8,
             shadow_size: SHADOW_SIZE,
+            cloud_steps: CLOUD_STEPS_FULL,
+            sky_cube_size: SKY_CUBE_SIZE,
             ssao: true,
             render_scale: 0.0,
             compress_textures: true,
@@ -3804,8 +3819,8 @@ impl Renderer {
             let cube_tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("sky cube"),
                 size: wgpu::Extent3d {
-                    width: SKY_CUBE_SIZE,
-                    height: SKY_CUBE_SIZE,
+                    width: options.sky_cube_size,
+                    height: options.sky_cube_size,
                     depth_or_array_layers: 6,
                 },
                 mip_level_count: 1,
@@ -3924,7 +3939,7 @@ impl Renderer {
             let cube_bind_groups: Vec<wgpu::BindGroup> = (0..6 * SKY_CUBE_ROUNDS)
                 .map(|k| {
                     let (f, round) = (k / SKY_CUBE_ROUNDS, k % SKY_CUBE_ROUNDS);
-                    let buf = buffer_init(&device, &queue, Some("sky cube face"), bytemuck::cast_slice(&[f as f32, round as f32, SKY_CUBE_SIZE as f32, 0.0]), wgpu::BufferUsages::UNIFORM);
+                    let buf = buffer_init(&device, &queue, Some("sky cube face"), bytemuck::cast_slice(&[f as f32, round as f32, options.sky_cube_size as f32, 0.0]), wgpu::BufferUsages::UNIFORM);
                     device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("sky cube"),
                         layout: &probe_layout,
@@ -4234,6 +4249,7 @@ impl Renderer {
             cloud_shape_view,
             cloud_detail_view,
             cloud_sampler,
+            cloud_steps: options.cloud_steps,
             sky_mesh,
             overlay_pipeline,
             overlay_layout,
@@ -6704,10 +6720,11 @@ impl Renderer {
             cloud: [
                 lighting.cloud_base.max(50.0),
                 lighting.cloud_top.max(lighting.cloud_base.max(50.0) + 100.0),
-                // (zw: the march's own steps and the ground shadow's reading of the layer,
-                // which the clouds' quality setting fills in and the shadow's branch adds)
+                // (z: the ground shadow's reading of the layer, which is another branch's)
                 0.0,
-                0.0,
+                // w the steps a ray marches the layer (`self.cloud_steps`), the clouds'
+                // quality setting: `sky_enhanced.wgsl` reads it as CLOUD_STEPS
+                self.cloud_steps as f32,
             ],
         };
         self.queue
