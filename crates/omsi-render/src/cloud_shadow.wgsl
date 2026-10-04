@@ -44,6 +44,29 @@ const CLOUD_DETAIL_PERIOD: f32 = 750.0;
 const CLOUD_DETAIL_STRENGTH: f32 = 0.3;
 const CLOUD_BILLOW_CARRY: f32 = 90.0;
 const CLOUD_EDGE_SOFTNESS: f32 = 0.12;
+// How much cloud stands inside a heap, over the whole of what it has rather than as a step.
+// The rim above saturates a tenth of the way in and then says nothing more, so a heap's
+// middle was as thick as its neighbour's and a deck's whole underside came out one flat
+// grey with no picture in it (seen from below at a cover of 0.75 and up, where the gaps
+// between heaps show the overcast table rather than blue and there is nothing else left to
+// carry a shape). The heap's depth is now read over `CLOUD_BODY_RANGE` of the same margin,
+// at `CLOUD_BODY_WEIGHT` of the result - a thin veil stays a veil, a deep heap is twice as
+// thick as a shallow one standing beside it, and the rim itself is untouched.
+const CLOUD_BODY_RANGE: f32 = 0.7;
+const CLOUD_BODY_WEIGHT: f32 = 0.65;
+// How much deeper than the mean heap this one stands. The extinction follows it: a deep heap is
+// a longer column of droplets than the shallow one beside it, and it reads darker from below
+// because less of the sky's light comes down through it - the deck's underside then carries the
+// shape of its own heaps instead of the one flat grey it was (which is what the cover's top
+// half looked like from underneath, whatever the weather said). Normalised on the map's
+// median heap (`CLOUD_HEAP_HEIGHT * (0.6 + 0.7 x 0.30)`), so the typical cloud is unchanged
+// and the spread - half as thick to three times - is what is new.
+const CLOUD_DEPTH_MEDIAN: f32 = 0.81;
+fn cloud_depth(b: f32) -> f32 {
+    let k = cloud_heap_height(b) / (CLOUD_HEAP_HEIGHT * CLOUD_DEPTH_MEDIAN);
+    return k * k;
+}
+
 const CLOUD_BOTTOM_SOFTNESS: f32 = 200.0;
 const CLOUD_TOP_SOFTNESS: f32 = 0.12;
 const CLOUD_FIELD_TILE: f32 = 14000.0;
@@ -104,7 +127,10 @@ fn cloud_sigma(p: vec3<f32>, coverage: f32, footprint: f32) -> f32 {
         return 0.0;
     }
     m = m - billow * smoothstep(1.0, 0.5, m) * CLOUD_DETAIL_STRENGTH;
-    m = smoothstep(0.0, CLOUD_EDGE_SOFTNESS, m + coverage - 1.0);
+    let margin = m + coverage - 1.0;
+    let edge = smoothstep(0.0, CLOUD_EDGE_SOFTNESS, margin);
+    let body = clamp(margin / CLOUD_BODY_RANGE, 0.0, 1.0);
+    m = edge * mix(1.0, body, CLOUD_BODY_WEIGHT) * cloud_depth(s.b);
     // the layer's bounds: a heap fades in over the band above its base and is cut off at
     // the top
     let cut = 1.0 - clamp((h - (1.0 - CLOUD_TOP_SOFTNESS)) / CLOUD_TOP_SOFTNESS, 0.0, 1.0);

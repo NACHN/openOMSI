@@ -38,7 +38,7 @@ const EARTH_R: f32 = 6371000.0;
 // player zooms in far enough for one cube texel to be worth several pixels. A step has to be
 // about as short as the finest lobe a detail period is asked for: 750 m means a 12 m octave,
 // which is a hundred and ninety-two steps over a three-kilometre layer.
-const CLOUD_STEPS: i32 = 192;
+const CLOUD_STEPS_FULL: i32 = 192;
 // Extinction per metre of the densest cloud.
 const CLOUD_SIGMA: f32 = 0.035;
 const CLOUD_SHAPE_PERIOD: f32 = 13000.0;
@@ -53,6 +53,29 @@ const CLOUD_DETAIL_STRENGTH: f32 = 0.3;
 // How far the billows carry a heap sideways between the base of the layer and its top (m).
 const CLOUD_BILLOW_CARRY: f32 = 90.0;
 const CLOUD_EDGE_SOFTNESS: f32 = 0.12;
+// How much cloud stands inside a heap, over the whole of what it has rather than as a step.
+// The rim above saturates a tenth of the way in and then says nothing more, so a heap's
+// middle was as thick as its neighbour's and a deck's whole underside came out one flat
+// grey with no picture in it (seen from below at a cover of 0.75 and up, where the gaps
+// between heaps show the overcast table rather than blue and there is nothing else left to
+// carry a shape). The heap's depth is now read over `CLOUD_BODY_RANGE` of the same margin,
+// at `CLOUD_BODY_WEIGHT` of the result - a thin veil stays a veil, a deep heap is twice as
+// thick as a shallow one standing beside it, and the rim itself is untouched.
+const CLOUD_BODY_RANGE: f32 = 0.7;
+const CLOUD_BODY_WEIGHT: f32 = 0.65;
+// How much deeper than the mean heap this one stands. The extinction follows it: a deep heap is
+// a longer column of droplets than the shallow one beside it, and it reads darker from below
+// because less of the sky's light comes down through it - the deck's underside then carries the
+// shape of its own heaps instead of the one flat grey it was (which is what the cover's top
+// half looked like from underneath, whatever the weather said). Normalised on the map's
+// median heap (`CLOUD_HEAP_HEIGHT * (0.6 + 0.7 x 0.30)`), so the typical cloud is unchanged
+// and the spread - half as thick to three times - is what is new.
+const CLOUD_DEPTH_MEDIAN: f32 = 0.81;
+fn cloud_depth(b: f32) -> f32 {
+    let k = cloud_heap_height(b) / (CLOUD_HEAP_HEIGHT * CLOUD_DEPTH_MEDIAN);
+    return k * k;
+}
+
 // The heap's own height above the layer's base, in metres, and the band at the layer's
 // base and top it fades in over and is cut off over. The profile is measured in metres and
 // not as a fraction of the layer on purpose: `cloud_base`/`cloud_top` say where cloud may
@@ -139,7 +162,7 @@ fn cloud_coverage(p: vec2<f32>) -> f32 {
 // The heap before its billows, and the billow that carves it - returned together, so the
 // caller need not fetch it again. The heap is as tall as it is, wherever the layer's top
 // happens to be (see CLOUD_HEAP_HEIGHT).
-fn cloud_base_shape(p: vec3<f32>, footprint: f32) -> vec2<f32> {
+fn cloud_base_shape(p: vec3<f32>, footprint: f32) -> vec3<f32> {
     let drift = camera.clouds.yz * 2500.0;
     // Each map is read at the mip its own texels ask for: a pixel covers `footprint` metres
     // of cloud, and the shape map is 256 texels over 13 km (51 m each) against the billow
@@ -165,7 +188,7 @@ fn cloud_base_shape(p: vec3<f32>, footprint: f32) -> vec2<f32> {
     let rise = (p.z - cloud_base()) / cloud_heap_height(s.b);
     let n = rise * rise * (0.30 + 0.35 * s.b) + pow(1.0 - clamp(rise, 0.0, 1.0), 16.0);
     let m = (s.r - n - lo) / (1.0 - lo);
-    return vec2<f32>(m, billow);
+    return vec3<f32>(m, billow, s.b);
 }
 
 // Extinction (1/m) at p; `detail` false for the light towards the sun far from the point.
@@ -182,7 +205,10 @@ fn cloud_sigma(p: vec3<f32>, h: f32, coverage: f32, footprint: f32, detail: bool
     if (detail) {
         m = m - shape.y * smoothstep(1.0, 0.5, m) * CLOUD_DETAIL_STRENGTH;
     }
-    m = smoothstep(0.0, CLOUD_EDGE_SOFTNESS, m + coverage - 1.0);
+    let margin = m + coverage - 1.0;
+    let edge = smoothstep(0.0, CLOUD_EDGE_SOFTNESS, margin);
+    let body = clamp(margin / CLOUD_BODY_RANGE, 0.0, 1.0);
+    m = edge * mix(1.0, body, CLOUD_BODY_WEIGHT) * cloud_depth(shape.z);
     // the layer's bounds: a heap fades in over the band above its base and is cut off at
     // the top - a heap taller than the layer loses its lid there, as one would
     let rise = p.z - cloud_base();
@@ -208,14 +234,22 @@ fn cloud_layer(d: vec3<f32>, below: vec3<f32>, pix: f32) -> vec4<f32> {
         return vec4<f32>(below, 0.0);
     }
     let t1 = min(cloud_shell(d, cloud_base() + cloud_band()), min(t0 + 24000.0, CLOUD_MAX_DIST + 6000.0));
-    let ds = (t1 - t0) / f32(CLOUD_STEPS);
+    // The quality setting's step count (`RenderOptions::cloud_steps`), never more than the
+    // full one the layer's own resolution was tuned at.
+    let steps = clamp(i32(enh.cloud.w), 16, CLOUD_STEPS_FULL);
+    let ds = (t1 - t0) / f32(steps);
     // How many metres of cloud one pixel covers where the ray meets the layer; both maps are
     // read at their own mip from this (see `cloud_base_shape`). The march's own step is *not*
     // taken into it: a step is the resolution along the ray, and folding it in here blurred
     // the map sideways as well, at a step of fifteen metres to a screen pixel of four - the
     // clouds went flat. What keeps the along-ray side honest is the step count against the
-    // volume's finest octave (`CLOUD_STEPS`).
-    let footprint = t0 * pix;
+    // volume's finest octave (`CLOUD_STEPS_FULL`).
+    // ...and no finer than the steps that walk it: a ray taking 40 m steps cannot resolve a
+    // 12 m octave, and reading it anyway leaves a regular comb along the steps which the
+    // per-redraw jitter then walks about (the shimmer). At the full step count a step is
+    // finer than the volume's own texels and this is one - nothing changes.
+    let step_blur = max(f32(CLOUD_STEPS_FULL) / f32(steps), 1.0);
+    let footprint = t0 * pix * step_blur;
     // (the sun before the clouds: how much of it the cover lets through, lights.w, is what
     // this march works out itself)
     let sun = enh.sun_disc.rgb * smoothstep(-0.08, 0.02, sd.z);
@@ -233,7 +267,10 @@ fn cloud_layer(d: vec3<f32>, below: vec3<f32>, pix: f32) -> vec4<f32> {
     var hit = 0.0;
     var hit_w = 0.0;
     var t = t0 + ds * cloud_jitter;
-    for (var i = 0; i < CLOUD_STEPS; i = i + 1) {
+    for (var i = 0; i < CLOUD_STEPS_FULL; i = i + 1) {
+        if (i >= steps) {
+            break;
+        }
         let p = vec3<f32>(cloud_ground(d, t), cloud_height(d, t));
         let h = (p.z - cloud_base()) / cloud_band();
         let sigma = cloud_sigma(p, h, coverage, footprint, true);
@@ -273,7 +310,18 @@ fn cloud_layer(d: vec3<f32>, below: vec3<f32>, pix: f32) -> vec4<f32> {
             // (single scattering and three octaves hold only part of the light a cloud
             // scatters on inside it; a cumulus's sunlit side is about as bright as white
             // paper in the sun, E/π, which this factor brings it to)
-            let amb = mix(ground * 0.45 + sky_top * 0.55, sky_top * 1.1, clamp(h * 1.4, 0.0, 1.0));
+            // The sky's own light is read through how much cloud stands over this point:
+            // `od` is the depth towards the sun, the local measure of it, and its exponent
+            // here is far gentler than the light's own. At the absolute depth of a real layer
+            // the sun's term is long dead, and a deck whose underside was lit by `amb` alone
+            // came out as one flat grey sheet with no heaps in it, at any cover above a half
+            // (there the gaps between heaps show the overcast table rather than blue, so
+            // nothing was left to give it a shape). Read softer, the same depth leaves an
+            // overcast's underside a picture of itself - thicker where its heaps stand, paler
+            // where the deck thins - and deepens a cumulus's shadowed side without touching
+            // its sunlit top, where the depth towards the sun is small.
+            let shade = exp(-od * 0.055);
+            let amb = mix(ground * 0.45 + sky_top * 0.55, sky_top * 1.1, clamp(h * 1.4, 0.0, 1.0)) * (0.40 + 0.60 * shade);
             let light = direct * CLOUD_MS_GAIN + amb;
             // Frostbite: the light scattered over the step, dimmed by the cloud before it
             let dt = exp(-sigma * ds);
