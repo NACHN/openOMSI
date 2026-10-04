@@ -661,15 +661,22 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     // --- sky and ground
     var ao = 1.0;
     if (camera.clouds.w > 0.5 && !capture) {
-        ao = ao_at(in.clip.xy, in.world);
+        ao = ao_at(in.clip.xy, in.world, mode > 1.5);
     }
     // AO is generated from the opaque depth buffer.  A transparent bus pane therefore
     // samples the seats/dashboard behind it and makes their dark outlines crawl across the
     // glass as the camera moves.  The pane has its own transmission/reflection path; it must
     // not inherit occlusion belonging to geometry on the far side of the window.
+    // Coverage decides that per pixel, not the material's blend mode: a blended material is
+    // see-through only where its alpha is low (a pane, a decal, a door), while a bus body
+    // whose windows share its material, and the whole blended cockpit of a bus, is opaque
+    // where it is painted. Skipping every blended pixel left those surfaces - the dashboard,
+    // the window frames, the body panels - lit as flat as if AO were off, and left the
+    // ground under a bus without the occlusion of the bus standing on it.
     // (nor any other blended surface: a van's translucent door showed the shade of what
-    // stood behind it)
-    if (glass || mode > 1.5) {
+    // stood behind it - `ao_at` now holds a blended surface to a quarter of the depth
+    // margin, so only its own surface answers)
+    if (glass || (mode > 1.5 && alpha < 0.5)) {
         ao = 1.0;
     }
     ao = ao * pbr_ao;

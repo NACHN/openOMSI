@@ -199,13 +199,16 @@ override ALPHA_TO_COVERAGE: bool = false;
 // the object in front: every wheel, pole and kerb stood in a pale outline on the shaded
 // ground under the bus. Of the four half-size texels around the pixel only those at the
 // pixel's own depth count (a depth-aware upsample); none of them: the closest in depth.
-fn ao_at(frag: vec2<f32>, world: vec3<f32>) -> f32 {
+fn ao_at(frag: vec2<f32>, world: vec3<f32>, blended: bool) -> f32 {
     let size = vec2<i32>(textureDimensions(t_ao));
     let z = (camera.view_proj * vec4<f32>(world, 1.0)).w;
     let f = frag * 0.5 - vec2<f32>(0.5);
     let base = vec2<i32>(floor(f));
     let fr = f - floor(f);
-    let tol = 0.04 + 0.015 * z;
+    // A blended surface is only the owner of that shade where its own depth is the one the
+    // AO was worked out from; the margin is a quarter of the opaque one, so a decal or a
+    // pane that merely hangs close in front of a surface cannot wear its occlusion.
+    let tol = (0.04 + 0.015 * z) * select(1.0, 0.25, blended);
     var sum = 0.0;
     var wsum = 0.0;
     var best = 1.0;
@@ -1539,10 +1542,15 @@ fn shade_vanilla(in: FsIn, puddle_weight: ptr<function, f32>, eye: vec3<f32>) ->
     // screen-space ambient occlusion darkens the indirect light (sky and ambient) in
     // corners, under the bus, between the seats - not the sun, which the shadow map handles
     var ao = 1.0;
-    // (not on a blended surface: the AO is the opaque depth's, and a translucent door
-    // showed the shade of what stood behind it)
-    if (camera.clouds.w > 0.5 && mode < 1.5) {
-        ao = ao_at(in.clip.xy, in.world);
+    // AO is worked out from the opaque depth buffer, so it belongs to the surface that
+    // wrote it. A see-through pixel of a blended material - a pane, a decal, a translucent
+    // door - is not that surface and must not wear the shade of what stands behind it.
+    // Coverage decides per pixel rather than the material's blend mode: a bus body whose
+    // windows share its material is opaque where it is painted, and it (and the whole
+    // cockpit of a bus, which is blended throughout) was getting no ambient occlusion at
+    // all. `ao_at` keeps only what its own depth answers for.
+    if (camera.clouds.w > 0.5 && (mode < 1.5 || tex.a * material.color.a * in.params.x > 0.5)) {
+        ao = ao_at(in.clip.xy, in.world, mode > 1.5);
     }
     var diffuse = camera.sun_color.rgb * camera.sun_dir.w * ndl * shadow + (camera.sky_color.rgb * from_above * (0.6 + 0.4 * shadow) + camera.ambient.xyz) * ao;
     var albedo = tex.rgb;
