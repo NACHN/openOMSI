@@ -22303,6 +22303,7 @@ _version: 2
   zh: "随云量"
   zh-tw: "隨雲量"
   ja: "雲量に応じて"
+
 "Cloud quality":
   de: "Wolkenqualität"
   fr: "Qualité des nuages"
@@ -22316,7 +22317,6 @@ _version: 2
   zh: "云质量"
   zh-tw: "雲品質"
   ja: "雲の品質"
-
 
 "Precipitation":
   pt: "Precipitação"

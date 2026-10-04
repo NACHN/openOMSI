@@ -1119,6 +1119,10 @@ pub struct Scene {
     camera_bind_group: Option<wgpu::BindGroup>,
     shadow_bind_group: Option<wgpu::BindGroup>,
     sky_bind_group: Option<wgpu::BindGroup>,
+    /// The weather's own cloud picture (`set_sky_textures_clouds`): the sky reads it for
+    /// its cover, and the ground shadow reads it too, so a shadow never falls where the
+    /// sky above shows blue (camera bind group binding 21).
+    sky_clouds: Option<TextureId>,
     /// HUD images drawn after the scene: (texture, rect in pixels x0,y0,x1,y1).
     pub overlays: Vec<(TextureId, [f32; 4])>,
     /// Overlay textures that hold premultiplied alpha (drawn by `omsi-ui`, e.g. the
@@ -1457,8 +1461,10 @@ fn sixteen_texture_units() -> bool {
 }
 
 /// The camera group's entries on a device whose arrays take `path`, without the enhanced
-/// path's textures where it has `sixteen` texture units (see `sixteen_texture_units`).
-fn camera_layout_entries(path: ArrayPath, sixteen: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
+/// path's textures where it has `sixteen` texture units (see `sixteen_texture_units`), and
+/// with the three cloud fields the shadow on the ground reads where it has
+/// `cloud_shadow` (see `CLOUD_SHADOW_TEXTURES`; the two are never both true).
+fn camera_layout_entries(path: ArrayPath, sixteen: bool, cloud_shadow: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
     let mut camera_entries = vec![
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
@@ -1591,6 +1597,35 @@ fn camera_layout_entries(path: ArrayPath, sixteen: bool) -> Vec<wgpu::BindGroupL
     }
     if sixteen {
         camera_entries.retain(|e| !ENHANCED_CAMERA_TEXTURES.contains(&e.binding));
+    }
+    if cloud_shadow {
+        // the three fields the shadow a heap throws on the ground is read from
+        // (cloud_shadow.wgsl): the enhanced clouds' shape map and the weather's own cloud
+        // picture, both 2-D, the detail volume that carves the heaps' edges, and one
+        // sampler for all three. The sky's own bind group holds the same three for the
+        // clouds themselves.
+        for (binding, dimension) in [
+            (15u32, wgpu::TextureViewDimension::D2),
+            (20, wgpu::TextureViewDimension::D3),
+            (21, wgpu::TextureViewDimension::D2),
+        ] {
+            camera_entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: dimension,
+                    multisampled: false,
+                },
+                count: None,
+            });
+        }
+        camera_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 16,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
     }
     camera_entries
 }
@@ -1820,6 +1855,11 @@ pub struct Renderer {
     cloud_shape_view: wgpu::TextureView,
     cloud_detail_view: wgpu::TextureView,
     cloud_sampler: wgpu::Sampler,
+    /// Whether the device has room for the shape map as a camera bind group binding, for
+    /// the clouds' shadow on the ground (see `cloud_shadow.wgsl`): decided at start-up,
+    /// and the camera layout, the camera bind group and the scene shader are all built to
+    /// match.
+    cloud_shadow: bool,
     /// `RenderOptions::cloud_steps`: read when the enhanced uniform is written.
     cloud_steps: u32,
     sky_mesh: (wgpu::Buffer, wgpu::Buffer, u32),
@@ -2296,6 +2336,29 @@ impl Renderer {
             Ok("downlevel") => limits = wgpu::Limits::downlevel_defaults(),
             _ => {}
         }
+        // The clouds' shadow on the ground (cloud_shadow.wgsl) reads the three fields the
+        // enhanced sky is built from (its shape map, its billows and the weather's cloud
+        // picture), which are three more sampled textures in the scene's fragment stage -
+        // past WebGPU's baseline of 16, which this renderer sits exactly on. A card with
+        // the room lends it them (a desktop one always does); a card without (an OpenGL
+        // one, or OMSI_GPU_LIMITS=default) keeps the plain sun and the stand-in shader,
+        // rather than the pipeline layout failing to build at all.
+        // (OMSI_NO_CLOUD_SHADOW=1 asks for the plain sun whatever the card could do.)
+        const CLOUD_SHADOW_TEXTURES: u32 = 3;
+        let asked = omsi_cfg::env::var_os("OMSI_NO_CLOUD_SHADOW").is_none();
+        let room = adapter.limits().max_sampled_textures_per_shader_stage
+            - limits.max_sampled_textures_per_shader_stage
+            >= CLOUD_SHADOW_TEXTURES;
+        // (not where the enhanced path is not made at all - OpenGL's sixteen texture
+        // units, see `sixteen_texture_units`: the shadow is drawn by `fs_enhanced`)
+        let cloud_shadow = asked && room && !sixteen_texture_units();
+        if cloud_shadow {
+            limits.max_sampled_textures_per_shader_stage += CLOUD_SHADOW_TEXTURES;
+        } else if !asked {
+            log::info!("cloud shadow off (OMSI_NO_CLOUD_SHADOW)");
+        } else {
+            log::info!("no room for the cloud shadow's three cloud fields ({} sampled textures a stage); the sun will not be dappled", limits.max_sampled_textures_per_shader_stage);
+        }
         // the shadow atlas is two maps wide: no wider than the card draws
         let shadow_size = shadow_size.min(limits.max_texture_dimension_2d / 2).max(256);
         let format = format
@@ -2376,7 +2439,7 @@ impl Renderer {
             ArrayPath::VertexTextures => log::warn!("{}: no storage buffers in vertex shaders; the scene's arrays are read from textures", info.name),
             ArrayPath::NoStorage => log::warn!("{}: no storage buffers; the scene's arrays are read from textures and the lamps light no pixels of their own", info.name),
         }
-        log::info!("opening graphics device: {} ({:?}, vendor {:#06x}, device {:#06x}), features {:?}, max buffer {} MB, max storage binding {} MB", info.name, info.backend, info.vendor, info.device, required_features, limits.max_buffer_size / 1_000_000, limits.max_storage_buffer_binding_size as u64 / 1_000_000);
+        log::info!("opening graphics device: {} ({:?}, vendor {:#06x}, device {:#06x}), features {:?}, max buffer {} MB, max storage binding {} MB, sampled textures a stage {} of {}", info.name, info.backend, info.vendor, info.device, required_features, limits.max_buffer_size / 1_000_000, limits.max_storage_buffer_binding_size as u64 / 1_000_000, limits.max_sampled_textures_per_shader_stage, adapter.limits().max_sampled_textures_per_shader_stage);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("omsi"),
@@ -2443,6 +2506,7 @@ impl Renderer {
             format!("{} ({:?})", info.name, info.backend),
             format,
             options,
+            cloud_shadow,
         );
         match scope.pop().await {
             None => Ok(renderer),
@@ -2460,6 +2524,7 @@ impl Renderer {
                     format!("{} ({:?})", info.name, info.backend),
                     format,
                     RenderOptions { msaa: 1, ..options },
+                    cloud_shadow,
                 ))
             }
             Some(e) => Err(anyhow!("renderer pipelines: {}", gpu_error_text(&e))),
@@ -2473,6 +2538,7 @@ impl Renderer {
         adapter_name: String,
         format: wgpu::TextureFormat,
         options: RenderOptions,
+        cloud_shadow: bool,
     ) -> Renderer {
         let (msaa, shadow_size) = (options.msaa, options.shadow_size);
         // A GPU error while multisampling is on is logged and switches multisampling off
@@ -2534,7 +2600,7 @@ impl Renderer {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("omsi"),
             source: wgpu::ShaderSource::Wgsl(
-                scene_shader_source(GL_BACKEND.load(std::sync::atomic::Ordering::Relaxed)).into(),
+                scene_shader_source(GL_BACKEND.load(std::sync::atomic::Ordering::Relaxed), cloud_shadow).into(),
             ),
         });
         let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2555,7 +2621,7 @@ impl Renderer {
                 array_layout_entry(10, wgpu::ShaderStages::VERTEX, false),
             ],
         });
-        let camera_entries = camera_layout_entries(array_path(), sixteen_texture_units());
+        let camera_entries = camera_layout_entries(array_path(), sixteen_texture_units(), cloud_shadow);
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("camera"),
             entries: &camera_entries,
@@ -4249,6 +4315,7 @@ impl Renderer {
             cloud_shape_view,
             cloud_detail_view,
             cloud_sampler,
+            cloud_shadow,
             cloud_steps: options.cloud_steps,
             sky_mesh,
             overlay_pipeline,
@@ -4406,6 +4473,7 @@ impl Renderer {
             camera_bind_group: None,
             shadow_bind_group: None,
             sky_bind_group: None,
+            sky_clouds: None,
             overlays: Vec::new(),
             premultiplied: Default::default(),
             transposed: Default::default(),
@@ -5802,6 +5870,13 @@ impl Renderer {
             ],
         });
         scene.sky_bind_group = Some(bg);
+        // the ground shadow reads the weather's picture too (camera bind group binding 21),
+        // so the camera group is made again whenever the weather hands another one in
+        let changed = scene.sky_clouds != clouds;
+        scene.sky_clouds = clouds;
+        if changed && scene.camera_bind_group.is_some() {
+            self.rebuild_camera_bind_group(scene);
+        }
     }
 
     pub fn add_instance(
@@ -7067,6 +7142,29 @@ impl Renderer {
         if sixteen_texture_units() {
             entries.retain(|e| !ENHANCED_CAMERA_TEXTURES.contains(&e.binding));
         }
+        if self.cloud_shadow {
+            let field = scene
+                .sky_clouds
+                .as_ref()
+                .map(|c| &scene.textures[*c].view)
+                .unwrap_or(&self.black_texture.view);
+            entries.push(wgpu::BindGroupEntry {
+                binding: 15,
+                resource: wgpu::BindingResource::TextureView(&self.cloud_shape_view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 16,
+                resource: wgpu::BindingResource::Sampler(&self.cloud_sampler),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 20,
+                resource: wgpu::BindingResource::TextureView(&self.cloud_detail_view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 21,
+                resource: wgpu::BindingResource::TextureView(field),
+            });
+        }
         let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("camera"),
             layout: &self.camera_layout,
@@ -7510,6 +7608,7 @@ impl Renderer {
             self.adapter_name.clone(),
             self.format,
             options,
+            self.cloud_shadow,
         );
         scene.dirty = true;
         scene.model_buf = None;
@@ -10563,8 +10662,8 @@ fn sky_input_differs(a: &atmosphere::SkyInput, b: &atmosphere::SkyInput) -> bool
 /// masks are read through `s_diffuse` at a UV clamped half a texel inside the tile, which
 /// is what `s_tile`'s clamp to edge gives; reading `t_trans`/`t_night` through both
 /// samplers fails the whole module ("Conflicting samplers").
-fn scene_shader_source(gl: bool) -> String {
-    arrays_as_textures(&scene_shader_text(gl), array_path())
+fn scene_shader_source(gl: bool, cloud_shadow: bool) -> String {
+    arrays_as_textures(&scene_shader_text(gl, cloud_shadow), array_path())
 }
 
 /// The scene module with its arrays read as `path` has them (see `ArrayPath`): each
@@ -10641,12 +10740,19 @@ fn indexing_as_calls(src: &str, name: &str, call: &str) -> String {
     out
 }
 
-fn scene_shader_text(gl: bool) -> String {
+fn scene_shader_text(gl: bool, cloud_shadow: bool) -> String {
     let src = [
         include_str!("colour.wgsl"),
         include_str!("shader.wgsl"),
         include_str!("enhanced_common.wgsl"),
         include_str!("puddle_common.wgsl"),
+        // before enhanced.wgsl, whose sun term calls into it (and the plain stand-in where
+        // the device has no room for the shape map's binding, see `cloud_shadow`)
+        if cloud_shadow {
+            include_str!("cloud_shadow.wgsl")
+        } else {
+            include_str!("cloud_shadow_none.wgsl")
+        },
         include_str!("enhanced.wgsl"),
     ]
     .join("\n");
@@ -12874,7 +12980,8 @@ mod tests {
     fn shaders_validate_and_match_the_uniforms() {
         use wgpu::naga;
         let modules = [
-            ("scene", scene_shader_source(false)),
+            ("scene", scene_shader_source(false, true)),
+            ("scene without the cloud shadow's binding", scene_shader_source(false, false)),
             ("sky", sky_shader_source()),
             ("corona", corona_shader_source()),
             ("post", include_str!("post.wgsl").to_string()),
@@ -12973,7 +13080,7 @@ mod tests {
     fn the_scene_shader_translates_to_glsl() {
         use wgpu::naga;
         use wgpu::naga::back::glsl;
-        let src = scene_shader_source(true);
+        let src = scene_shader_source(true, true);
         let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module)
@@ -13044,7 +13151,7 @@ mod tests {
             (ArrayPath::VertexTextures, [glsl::Version::Embedded { version: 310, is_webgl: false }, glsl::Version::Desktop(430)]),
             (ArrayPath::NoStorage, [glsl::Version::Embedded { version: 300, is_webgl: false }, glsl::Version::Desktop(330)]),
         ] {
-            let src = arrays_as_textures(&scene_shader_text(true), path);
+            let src = arrays_as_textures(&scene_shader_text(true, false), path);
             assert!(!src.contains("models[") && !src.contains("inst_params[") && !src.contains("draw_list["));
             assert_eq!(src.contains("var<storage"), path == ArrayPath::VertexTextures, "{path:?}");
             let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{path:?}: {}", e.emit_to_string(&src)));
@@ -13083,11 +13190,16 @@ mod tests {
         let material = textures(&material_layout_entries());
         for path in [ArrayPath::Storage, ArrayPath::VertexTextures, ArrayPath::NoStorage] {
             let sixteen = path != ArrayPath::Storage;
-            let n = textures(&camera_layout_entries(path, sixteen)) + material;
+            let n = textures(&camera_layout_entries(path, sixteen, false)) + material;
             assert!(n <= 16, "{path:?}: {n} textures");
         }
         // (and nothing is left out where storage buffers carry the arrays)
-        assert_eq!(textures(&camera_layout_entries(ArrayPath::Storage, false)) + material, 16);
+        assert_eq!(textures(&camera_layout_entries(ArrayPath::Storage, false, false)) + material, 16);
+        // the clouds' shadow on the ground reads three fields more, past the WebGPU baseline
+        // of sixteen this layout sits exactly on: a device that takes them is asked for the
+        // higher limit (`CLOUD_SHADOW_TEXTURES`), and one that cannot is left without the
+        // cloud shadow rather than with a layout that will not build
+        assert_eq!(textures(&camera_layout_entries(ArrayPath::Storage, false, true)) + material, 16 + 3);
         // the entry points that read a texture left out are the enhanced path's, the
         // probe's, the puddles' and the reflection pass's - none made there
         let left_out = |src: &str| -> Vec<String> {
@@ -13107,7 +13219,7 @@ mod tests {
         };
         let only_enhanced = |name: &str| name.contains("enhanced") || name.contains("probe") || name.contains("puddle") || name.contains("reflections") || name == "fs_sky_cube";
         for path in [ArrayPath::VertexTextures, ArrayPath::NoStorage] {
-            let scene = arrays_as_textures(&scene_shader_text(true), path);
+            let scene = arrays_as_textures(&scene_shader_text(true, false), path);
             for src in [scene, sky_shader_source(), corona_shader_source()] {
                 for name in left_out(&src) {
                     assert!(only_enhanced(&name), "{path:?}: {name} reads an enhanced texture");
