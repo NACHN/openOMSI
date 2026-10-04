@@ -1199,13 +1199,17 @@ fn step_time(l: &mut Launcher, r: Rect) {
             changed |= ui.slider("custom-hum", Rect::new(v.x + 4.0, yy, v.w - 12.0, 34.0), &mut custom.humidity, 0.0, 100.0, 1.0, "Humidity", &|x| format!("{x:.0} % · dew {:.0} °C", crate::weather_setup::dew_point_c(temp_for_dew, x)));
             yy += 44.0;
 
-            ui.label(Rect::new(v.x + 4.0, yy, 130.0, 32.0), "Cloud type");
-            let cloud_labels: Vec<String> = crate::weather_setup::CUSTOM_CLOUDS.iter().map(|x| (*x).to_string()).collect();
-            let mut cloud = custom.cloud;
-            if ui.select("custom-cloud", Rect::new(v.x + 134.0, yy, v.w - 142.0, 32.0), &mut cloud, &cloud_labels) {
-                custom.cloud = cloud;
-                changed = true;
-            }
+            // How much of the sky the clouds cover: a slider, not a list of types - the sky
+            // reads the cover continuously, so there is no reason to snap to five of them
+            // (and the five are still there, as the points this was drawn between).
+            changed |= ui.slider("custom-cloud", Rect::new(v.x + 4.0, yy, v.w - 12.0, 34.0), &mut custom.cloud_cover, 0.0, 1.0, 0.01, "Cloud cover", &|x| if x <= 0.0 { "clear sky".into() } else { format!("{:.0} %", x * 100.0) });
+            yy += 44.0;
+
+            // The layer those clouds stand in (0 = let the cover decide): a low thick one is
+            // the dark ceiling a storm has, a high thin one fair weather.
+            changed |= ui.slider("custom-cbase", Rect::new(v.x + 4.0, yy, v.w - 12.0, 34.0), &mut custom.cloud_base_m, 0.0, 5000.0, 50.0, "Cloud base", &|x| if x <= 0.0 { "by cover".into() } else { format!("{x:.0} m") });
+            yy += 40.0;
+            changed |= ui.slider("custom-ctop", Rect::new(v.x + 4.0, yy, v.w - 12.0, 34.0), &mut custom.cloud_top_m, 0.0, 6000.0, 50.0, "Cloud top", &|x| if x <= 0.0 { "by cloud type".into() } else { format!("{x:.0} m") });
             yy += 44.0;
 
             ui.label(Rect::new(v.x + 4.0, yy, 130.0, 32.0), "Precipitation");

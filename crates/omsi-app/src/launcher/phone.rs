@@ -885,13 +885,14 @@ fn time_sheet(l: &mut Launcher, r: Rect) -> bool {
             changed |= ui.slider("ps-custom-hum", Rect::new(v.x, yy, v.w - 8.0, 40.0), &mut custom.humidity, 0.0, 100.0, 1.0, "Humidity", &|x| format!("{x:.0} % · dew {:.0} °C", crate::weather_setup::dew_point_c(t, x)));
             yy += 50.0;
 
-            ui.label(Rect::new(v.x, yy, 120.0, 38.0), "Cloud type");
-            let cloud_labels: Vec<String> = crate::weather_setup::CUSTOM_CLOUDS.iter().map(|x| (*x).to_string()).collect();
-            let mut cloud = custom.cloud;
-            if ui.select("ps-custom-cloud", Rect::new(v.x + 122.0, yy, v.w - 130.0, 38.0), &mut cloud, &cloud_labels) {
-                custom.cloud = cloud;
-                changed = true;
-            }
+            // how much of the sky the clouds cover (a slider: the sky reads it continuously)
+            changed |= ui.slider("ps-custom-cloud", Rect::new(v.x, yy, v.w - 8.0, 40.0), &mut custom.cloud_cover, 0.0, 1.0, 0.01, "Cloud cover", &|x| if x <= 0.0 { "clear sky".into() } else { format!("{:.0} %", x * 100.0) });
+            yy += 48.0;
+
+            // the layer those clouds stand in (0 = let the cover decide)
+            changed |= ui.slider("ps-custom-cbase", Rect::new(v.x, yy, v.w - 8.0, 40.0), &mut custom.cloud_base_m, 0.0, 5000.0, 50.0, "Cloud base", &|x| if x <= 0.0 { "by cover".into() } else { format!("{x:.0} m") });
+            yy += 46.0;
+            changed |= ui.slider("ps-custom-ctop", Rect::new(v.x, yy, v.w - 8.0, 40.0), &mut custom.cloud_top_m, 0.0, 6000.0, 50.0, "Cloud top", &|x| if x <= 0.0 { "by cloud type".into() } else { format!("{x:.0} m") });
             yy += 48.0;
 
             ui.label(Rect::new(v.x, yy, 120.0, 38.0), "Precipitation");

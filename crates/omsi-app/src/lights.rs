@@ -55,12 +55,24 @@ pub fn apply_weather(
 ) {
     let o = cloud_density.clamp(0.0, 1.0);
     let overcast = (o - 0.45).max(0.0) / 0.55; // cumulus cover keeps the sun; a closed sky loses it
+    // How much of the sun is left is a *different* reading of the cover from how grey the sky
+    // is. Cloud is not a dimmer on the sun, it is a thing in the way of it: a cover of `o`
+    // stands between the ground and about `o` of the sun, and only the last of the slider is
+    // the closed sky the sun is gone from altogether. (Taken as the dome's own `overcast`,
+    // (o - 0.45)/0.55 - which reaches 0.64 at a cover of 0.8 - the sun kept 46 % of itself
+    // over a sky that was four fifths shut, so the ground read as a sunny day's: the bright
+    // patches and the shadows between them stayed the first thing a player saw, whatever the
+    // cloud setting said.)
+    let sunless = {
+        let t = ((o - 0.15) / 0.8).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
     let grey = |c: Vec3, k: f32| -> Vec3 {
         let lum = c.dot(Vec3::new(0.3, 0.59, 0.11));
         c.lerp(Vec3::splat(lum), k)
     };
-    // the sun: dimmed and whitened under cloud, gone under overcast
-    l.sun_intensity *= 1.0 - 0.85 * overcast;
+    // the sun: blocked by the cloud (the reading above), whitened as the sky greys
+    l.sun_intensity *= 1.0 - 0.9 * sunless;
     l.sun_color = grey(l.sun_color, 0.6 * o);
     // the sky light is what is left, greyer and a little darker
     let sky_lum = l.sky_color.dot(Vec3::new(0.3, 0.59, 0.11));

@@ -20,17 +20,53 @@
 // The sky cube keeps the result in a fixed world frame (lib.rs `SKY_CUBE_SIZE`): each
 // redraw starts the steps at another random point and is blended into what is there, so
 // the grain of a few dozen steps averages out over the frames.
-const CLOUD_BOTTOM: f32 = 1400.0;
-const CLOUD_TOP: f32 = 2800.0;
+// The layer stands where the weather puts it (`Lighting::cloud_base/cloud_top`, from
+// `weather_setup::cloud_layer_of`): 1400-2800 m by default, a storm's three-kilometre
+// pile-up or an overcast's low ceiling otherwise.
+fn cloud_base() -> f32 {
+    return enh.cloud.x;
+}
+fn cloud_band() -> f32 {
+    return max(enh.cloud.y - enh.cloud.x, 100.0);
+}
 const EARTH_R: f32 = 6371000.0;
-const CLOUD_STEPS: i32 = 56;
+// How many steps a ray takes through the layer. This is also the finest the volume can be
+// read at all: with 56 over a three-kilometre layer a step is fifty metres, and the billow
+// volume's finest octave (64 cycles to its period - twelve metres at a period of 750) went
+// through it four times too fast. What that leaves is a regular comb down the steps, and each
+// redraw's new jitter walks it about, which is the shimmer on a still sky - seen only once a
+// player zooms in far enough for one cube texel to be worth several pixels. A step has to be
+// about as short as the finest lobe a detail period is asked for: 750 m means a 12 m octave,
+// which is a hundred and ninety-two steps over a three-kilometre layer.
+const CLOUD_STEPS: i32 = 192;
 // Extinction per metre of the densest cloud.
 const CLOUD_SIGMA: f32 = 0.035;
 const CLOUD_SHAPE_PERIOD: f32 = 13000.0;
-const CLOUD_DETAIL_PERIOD: f32 = 420.0;
+// The billows that eat the heaps' edges. Their period sets the size of the lobes a heap
+// comes out in: at 420 m the volume's three octaves carved it into 140, 52 and 26 m balls,
+// and a cloud two kilometres across looked like a heap of peas rather than one cloud.
+// (Read at its own scale in z as well: the volume is 64 slices over the same 2000 m, and
+// multiplying z by three to keep the billows changing up a tall layer put its 16-cycle
+// octave at 42 m, which combed every cloud with visible layer lines.)
+const CLOUD_DETAIL_PERIOD: f32 = 750.0;
 const CLOUD_DETAIL_STRENGTH: f32 = 0.3;
+// How far the billows carry a heap sideways between the base of the layer and its top (m).
+const CLOUD_BILLOW_CARRY: f32 = 90.0;
 const CLOUD_EDGE_SOFTNESS: f32 = 0.12;
-const CLOUD_BOTTOM_SOFTNESS: f32 = 0.2;
+// The heap's own height above the layer's base, in metres, and the band at the layer's
+// base and top it fades in over and is cut off over. The profile is measured in metres and
+// not as a fraction of the layer on purpose: `cloud_base`/`cloud_top` say where cloud may
+// stand at all, they do not stretch what stands there. Taken as a fraction, raising the top
+// drew the same heap taller - a cloud two kilometres across and three high, pulling the
+// billows with it into vertical streaks.
+const CLOUD_HEAP_HEIGHT: f32 = 1400.0;
+// Every heap takes a share of that from the map's rounding channel, so a layer tall enough
+// holds small puffs and towering cumulus together (about 800 m to 1.8 km).
+fn cloud_heap_height(b: f32) -> f32 {
+    return CLOUD_HEAP_HEIGHT * (0.6 + 0.7 * b);
+}
+const CLOUD_BOTTOM_SOFTNESS: f32 = 200.0;
+const CLOUD_TOP_SOFTNESS: f32 = 0.12;
 const CLOUD_MAX_DIST: f32 = 60000.0;
 const CLOUD_MS_GAIN: f32 = 2.4;
 
@@ -74,69 +110,121 @@ fn cloud_shell(d: vec3<f32>, h: f32) -> f32 {
     return select(-1.0, hi, hi > 0.0);
 }
 
-// How much of the sky the weather covers here: its type (camera.clouds.x) and, over tens
-// of kilometres, its own cloud picture.
+// How much of the sky the weather covers here: the weather's own cover (camera.clouds.x) and,
+// over tens of kilometres, its own cloud picture. This is the height a heap has to reach to be
+// drawn at all, so it is the one number that says how much blue is left, and it is read almost
+// straight. Measured against the sky itself - a wide view upward, counting the pixels that are
+// still clearly blue - the coverage a cover needs runs about 0.41 + 0.30 x cover, so a tenth of
+// the slider is a tenth of the sky and half of it half the sky. (The earlier curves were read
+// off `cloud_report`, which turned out to be a poor model of the sky: 0.545 + 0.155 sqrt put a
+// cover of 0.1 at two fifths of the sky - "16 % is a clear sky and 18 % is a whole deck", as a
+// player put it - with the middle of the slider moving nothing at all.)
+//
+// The top of the range is carried further, to shut the sky: heaps leave gaps between them
+// whatever the cover says, and without the 0.10 x cover^8 term a cover of 1.0 still left a
+// tenth of the sky open - a hole with the sun to see by, and a bright patch of ground under it
+// with the edge of a shadow around it, while the weather called the sky closed. With it the
+// coverage reaches 0.81 there, which `cloud_report` reads as every texel of the map carrying
+// cloud. The weather's own cloud picture - the field below, which swings the cover either way
+// over tens of kilometres - is faded out as the cover closes, having no gaps left to swing it
+// into.
 fn cloud_coverage(p: vec2<f32>) -> f32 {
     let cover = camera.clouds.x;
     let uv = p / CLOUD_FIELD_TILE + camera.clouds.yz * (2500.0 / CLOUD_FIELD_TILE);
     let field = textureSampleLevel(t_clouds, s_repeat, uv * 0.35, 5.0).g;
-    return clamp(0.3 + cover * 0.55 + (field - 0.5) * 0.25, 0.0, 1.0);
+    let field_w = 0.16 * (1.0 - pow(cover, 4.0));
+    return clamp(0.408 + cover * 0.2975 + 0.10 * pow(cover, 8.0) + (field - 0.5) * field_w, 0.0, 1.0);
 }
 
-// The heap before its billows (h: 0 at the base, 1 at the top of the layer).
-fn cloud_base_shape(p: vec3<f32>, h: f32, lod: f32) -> f32 {
+// The heap before its billows, and the billow that carves it - returned together, so the
+// caller need not fetch it again. The heap is as tall as it is, wherever the layer's top
+// happens to be (see CLOUD_HEAP_HEIGHT).
+fn cloud_base_shape(p: vec3<f32>, footprint: f32) -> vec2<f32> {
     let drift = camera.clouds.yz * 2500.0;
-    let s = textureSampleLevel(t_cloud_shape, s_cloud, (p.xy + drift) / CLOUD_SHAPE_PERIOD, lod);
+    // Each map is read at the mip its own texels ask for: a pixel covers `footprint` metres
+    // of cloud, and the shape map is 256 texels over 13 km (51 m each) against the billow
+    // volume's 64 over the detail period (12 m at 750). Taking the volume at the shape's own
+    // level - `lod - 2`, as it was - left it four mips too sharp, and the billows it read
+    // there were aliased: a regular diagonal comb over every distant cloud, and the march's
+    // per-redraw jitter walked it about, which is the shimmer on a still sky. (The carry
+    // below turns that aliasing into a wobble of the heap's edge, at 90 m of it.)
+    let shape_lod = log2(max(footprint * f32(textureDimensions(t_cloud_shape).x) / CLOUD_SHAPE_PERIOD, 1.0));
+    let detail_lod = log2(max(footprint * f32(textureDimensions(t_cloud_detail).x) / CLOUD_DETAIL_PERIOD, 1.0));
+    // The billows come first: besides eating the heaps' edges they carry each heap
+    // sideways as it rises. Held back, every heap was the same column from its base to its
+    // top, and the layer read as one flat sheet however tall it was drawn.
+    let q = vec3<f32>(p.xy + camera.clouds.yz * 2500.0 * 1.3, p.z) / CLOUD_DETAIL_PERIOD;
+    let billow = textureSampleLevel(t_cloud_detail, s_cloud, q, detail_lod).r;
+    let carry = CLOUD_BILLOW_CARRY * (billow - 0.5);
+    let s = textureSampleLevel(t_cloud_shape, s_cloud, (p.xy + drift + vec2<f32>(carry, carry * 0.35)) / CLOUD_SHAPE_PERIOD, shape_lod);
     let lo = s.g - 1.0;
-    // the heap narrows upwards (every heap: with the map's rounding alone, a heap where it
-    // was small rose as a column with a flat lid against the top of the layer)
-    let n = h * h * (0.7 + s.b) + pow(1.0 - h, 16.0);
+    // The heap narrows upwards, and the map rounds its top off (a heap where it was small
+    // rose as a column with a flat lid). It narrows far more gently than it used to: with
+    // the old profile a heap was spent by the middle of the layer, and 400 m of cloud over
+    // a heap two kilometres across is a pancake.
+    let rise = (p.z - cloud_base()) / cloud_heap_height(s.b);
+    let n = rise * rise * (0.30 + 0.35 * s.b) + pow(1.0 - clamp(rise, 0.0, 1.0), 16.0);
     let m = (s.r - n - lo) / (1.0 - lo);
-    return m * (linearstep(0.0, 0.1, h) - linearstep(0.6, 1.0, h));
+    return vec2<f32>(m, billow);
 }
 
 // Extinction (1/m) at p; `detail` false for the light towards the sun far from the point.
-fn cloud_sigma(p: vec3<f32>, h: f32, coverage: f32, lod: f32, detail: bool) -> f32 {
+fn cloud_sigma(p: vec3<f32>, h: f32, coverage: f32, footprint: f32, detail: bool) -> f32 {
     if (h <= 0.0 || h >= 1.0) {
         return 0.0;
     }
-    var m = cloud_base_shape(p, h, lod);
+    let shape = cloud_base_shape(p, footprint);
+    var m = shape.x;
     // (the billows only take away)
     if (m + coverage - 1.0 <= 0.0) {
         return 0.0;
     }
     if (detail) {
-        let drift = camera.clouds.yz * 2500.0 * 1.3;
-        let q = vec3<f32>(p.xy + drift, p.z) / CLOUD_DETAIL_PERIOD;
-        let dl = textureSampleLevel(t_cloud_detail, s_cloud, q, max(lod - 2.0, 0.0)).r;
-        m = m - dl * smoothstep(1.0, 0.5, m) * CLOUD_DETAIL_STRENGTH;
+        m = m - shape.y * smoothstep(1.0, 0.5, m) * CLOUD_DETAIL_STRENGTH;
     }
     m = smoothstep(0.0, CLOUD_EDGE_SOFTNESS, m + coverage - 1.0);
-    m = m * min(h / CLOUD_BOTTOM_SOFTNESS, 1.0);
+    // the layer's bounds: a heap fades in over the band above its base and is cut off at
+    // the top - a heap taller than the layer loses its lid there, as one would
+    let rise = p.z - cloud_base();
+    let cut = 1.0 - linearstep(1.0 - CLOUD_TOP_SOFTNESS, 1.0, h);
+    m = m * min(rise / CLOUD_BOTTOM_SOFTNESS, 1.0) * cut;
     return m * CLOUD_SIGMA;
 }
 
 // The clouds towards d in front of `below` (the sky behind them): rgb the picture, a how
 // much the clouds cover.
 fn cloud_layer(d: vec3<f32>, below: vec3<f32>, pix: f32) -> vec4<f32> {
-    if (camera.clouds.x <= 0.001 || d.z <= -0.01 || camera.cam_pos.z + eye_off.z > CLOUD_BOTTOM) {
+    if (camera.clouds.x <= 0.001 || d.z <= -0.01 || camera.cam_pos.z + eye_off.z > cloud_base()) {
         return vec4<f32>(below, 0.0);
     }
     let sd = normalize(camera.sun_dir.xyz);
-    // a closed cover (or a sky that rain or snow falls from) is the grey deck of the table
+    // How closed the cover is: it hides the sun's disc (the alpha this returns) and holds
+    // back the high thin layer. It no longer paints a flat grey card over the clouds - the
+    // weather that a closed cover comes with now stands as a low, thick, unlit layer of
+    // real cloud (`cloud_layer_of`), which is the dark ceiling a rainy sky has.
     let closed = max(smoothstep(0.85, 1.0, camera.clouds.x), enh.weather.w);
-    let t0 = cloud_shell(d, CLOUD_BOTTOM);
+    let t0 = cloud_shell(d, cloud_base());
     if (t0 < 0.0 || t0 > CLOUD_MAX_DIST) {
         return vec4<f32>(below, 0.0);
     }
-    let t1 = min(cloud_shell(d, CLOUD_TOP), min(t0 + 12000.0, CLOUD_MAX_DIST + 6000.0));
+    let t1 = min(cloud_shell(d, cloud_base() + cloud_band()), min(t0 + 24000.0, CLOUD_MAX_DIST + 6000.0));
     let ds = (t1 - t0) / f32(CLOUD_STEPS);
-    // how many texels of the shape map a pixel spans where the ray meets the clouds
-    let lod = log2(max(t0 * pix * f32(textureDimensions(t_cloud_shape).x) / CLOUD_SHAPE_PERIOD, 1.0));
+    // How many metres of cloud one pixel covers where the ray meets the layer; both maps are
+    // read at their own mip from this (see `cloud_base_shape`). The march's own step is *not*
+    // taken into it: a step is the resolution along the ray, and folding it in here blurred
+    // the map sideways as well, at a step of fifteen metres to a screen pixel of four - the
+    // clouds went flat. What keeps the along-ray side honest is the step count against the
+    // volume's finest octave (`CLOUD_STEPS`).
+    let footprint = t0 * pix;
     // (the sun before the clouds: how much of it the cover lets through, lights.w, is what
     // this march works out itself)
     let sun = enh.sun_disc.rgb * smoothstep(-0.08, 0.02, sd.z);
-    let sky_top = sh_irradiance(vec3<f32>(0.0, 0.0, 1.0)) / PI;
+    // The light a heap takes from above: read through the cover over it, because a closed sky
+    // has already spent most of it before it reaches the layer's underside - which is what
+    // makes an overcast's base the grey of a storm cloud, while fair-weather cumulus keeps its
+    // bright tops. (Squared: it is a closed cover that shows, not a scattered one.)
+    let over = camera.clouds.x;
+    let sky_top = sh_irradiance(vec3<f32>(0.0, 0.0, 1.0)) / PI * (1.0 - 0.65 * over * over);
     let ground = sh_irradiance(vec3<f32>(0.0, 0.0, -1.0)) / PI;
     let cos_sun = dot(d, sd);
     let coverage = cloud_coverage(cloud_ground(d, t0));
@@ -147,20 +235,25 @@ fn cloud_layer(d: vec3<f32>, below: vec3<f32>, pix: f32) -> vec4<f32> {
     var t = t0 + ds * cloud_jitter;
     for (var i = 0; i < CLOUD_STEPS; i = i + 1) {
         let p = vec3<f32>(cloud_ground(d, t), cloud_height(d, t));
-        let h = (p.z - CLOUD_BOTTOM) / (CLOUD_TOP - CLOUD_BOTTOM);
-        let sigma = cloud_sigma(p, h, coverage, lod, true);
+        let h = (p.z - cloud_base()) / cloud_band();
+        let sigma = cloud_sigma(p, h, coverage, footprint, true);
         if (sigma > 1e-6) {
-            // the sunlight reaching p through the cloud towards the sun
+            // The sunlight reaching p through the cloud towards the sun. The steps have to
+            // carry the ray across the layer - six of them growing 1.7 times reach 17 x the
+            // first, so the first is a fourteenth of the layer's height. Fixed at 40 m they
+            // covered 774 m of the old 1400 m layer and only a quarter of a storm's: the
+            // depth sat at full within the first few steps every time, the whole inside of a
+            // heap came out as lit as its rim, and a cloud had no side to be seen.
             var od = 0.0;
-            var ls = 40.0;
+            var ls = CLOUD_HEAP_HEIGHT / 14.0;
             var lt = ls * 0.5;
             for (var k = 0; k < 6; k = k + 1) {
                 let q = p + sd * lt;
-                let hq = (q.z - CLOUD_BOTTOM) / (CLOUD_TOP - CLOUD_BOTTOM);
+                let hq = (q.z - cloud_base()) / cloud_band();
                 if (hq >= 1.0) {
                     break;
                 }
-                od = od + cloud_sigma(q, hq, coverage, lod + 1.0, k < 2) * ls;
+                od = od + cloud_sigma(q, hq, coverage, footprint * 2.0, k < 2) * ls;
                 ls = ls * 1.7;
                 lt = lt + ls;
             }
@@ -202,11 +295,9 @@ fn cloud_layer(d: vec3<f32>, below: vec3<f32>, pix: f32) -> vec4<f32> {
     let a = (1.0 - trans) * fade * horizon_fade;
     acc = mix(acc, below * (1.0 - trans), aerial) * fade * horizon_fade;
     var col = acc + (1.0 - a) * below;
-    let deck = below * (0.75 + 0.35 * cloud_cover_at(cloud_ground(d, max(t0, 1.0)), 4.0).x);
-    col = mix(col, deck, closed);
     // the high, thin layer
     let drift = camera.clouds.yz * 2500.0;
-    let t_hi = 7000.0 / max(d.z, 0.02);
+    let t_hi = (cloud_base() + 6.0 * cloud_band()) / max(d.z, 0.02);
     let p_hi = cloud_ground(d, t_hi);
     let hi = cloud_fbm((p_hi + drift * 1.7) / 2500.0);
     let hi_cover = clamp((hi - 0.6 + camera.clouds.x * 0.2) * 2.0, 0.0, 1.0) * clamp(d.z * 8.0, 0.0, 1.0) * 0.35 * (1.0 - a) * (1.0 - closed);
@@ -238,8 +329,14 @@ fn fs_enhanced(in: VsOut) -> @location(0) vec4<f32> {
     // the cube is drawn from its own eye (lib.rs Probe::cube_eye): look the clouds' base up
     // from there, so the sky does not slide with a camera that moved since
     var ld = d;
-    let tb = cloud_shell(d, CLOUD_BOTTOM);
-    if (tb > 0.0 && camera.cam_pos.z < CLOUD_BOTTOM) {
+    // (The cube is drawn from an eye that the camera leaves behind between two captures, and
+    // this re-projects onto it. Taken against the layer's *base* that is exact for a heap's
+    // foot and off by `offset x (1/base - 1/cloud)` for anything above it - at three
+    // kilometres, and 140 m of driving, four degrees for the top of a tall layer: the clouds
+    // slid along with the camera and snapped back at every capture. The lower-middle is where
+    // most of a heap's mass stands, so it spreads that error over the layer instead.)
+    let tb = cloud_shell(d, cloud_base() + cloud_band() * 0.4);
+    if (tb > 0.0 && camera.cam_pos.z < cloud_base()) {
         ld = normalize(d * min(tb, CLOUD_MAX_DIST) - enh.eye.xyz);
     }
     let cube = textureSampleLevel(t_sky_cube, s_lin, vec3<f32>(ld.x, ld.z, ld.y), 0.0);

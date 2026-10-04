@@ -830,6 +830,9 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
             v
         }
         "rain_amt" | "wet" => (0..=100).map(|v| v as f32 / 100.0).collect(),
+        // the cloud cover: the sky reads it as a continuous quantity, so the setting is a
+        // slider of its own rather than a list of the five cloud types
+        "cloud_cover" => (0..=50).map(|v| v as f32 / 50.0).collect(),
         "brightness" => (0..=30).map(|v| v as f32 * 0.05).collect(),
         "humidity" => (0..=100).map(|v| v as f32).collect(),
         "temp" => (-20..=45).map(|v| v as f32).collect(),
@@ -839,9 +842,10 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
     })
 }
 
-/// The cloud types of OMSI's weather (`Weather/clouds.cfg`): the name in a weather file and
-/// the name shown.
-const CLOUD_TYPES: [(&str, &str); 5] = [("-1", "None"), ("Cumulus 1", "Few clouds"), ("Cumulus 2", "Scattered"), ("Cumulus 3", "Broken"), ("Overcast 1", "Overcast")];
+/// The cloud types of OMSI's weather: `weather_setup::CLOUD_KINDS`, the one table that holds
+/// the name a weather file writes, the name shown, the cover and the layer - read from here
+/// so the game's list and the sky cannot drift apart again.
+use crate::weather_setup::CLOUD_KINDS;
 
 /// The kinds of precipitation of a weather file (`[precip]`'s first number).
 const PRECIP_KINDS: [&str; 3] = ["None", "Rain", "Snow"];
@@ -849,10 +853,9 @@ const PRECIP_KINDS: [&str; 3] = ["None", "Rain", "Snow"];
 /// The name the weather has once it was set by hand.
 pub(crate) const CUSTOM_WEATHER: &str = "Custom weather";
 
-/// The index of the cloud type `kind` (a weather file's) in `CLOUD_TYPES`.
+/// The index of the cloud type `kind` (a weather file's) in `CLOUD_KINDS`.
 fn cloud_index(kind: &str) -> Option<usize> {
-    let k = kind.trim();
-    CLOUD_TYPES.iter().position(|(id, _)| id.eq_ignore_ascii_case(k) || (*id == "-1" && (k.is_empty() || k.starts_with("-1"))))
+    crate::weather_setup::cloud_kind_index(kind)
 }
 
 /// Set the kind of precipitation (an index of `PRECIP_KINDS`) of the weather set by hand.
@@ -967,6 +970,10 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
             if w.precip.first().copied().unwrap_or(0.0) < 0.5 { 0.0 } else { (w.precip.get(1).copied().unwrap_or(0.0) / 255.0).clamp(0.0, 1.0) }
         }
         "wet" => app.wetness,
+        "cloud_cover" => {
+            let w = app.weather.as_ref()?;
+            w.cloud_cover.unwrap_or_else(|| cloud_index(&w.clouds.0).map(|i| CLOUD_KINDS[i].cover).unwrap_or(0.0))
+        }
         "brightness" => custom_state(app).brightness,
         "humidity" => custom_state(app).humidity,
         "temp" => app.weather.as_ref()?.temp.0,
@@ -1131,6 +1138,10 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
         }
         "wet" => {
             let mut c=custom_state(app); c.road_wetness=v; app.set_custom_weather(c); None
+        }
+        "cloud_cover" => {
+            app.edit_weather(|w| w.cloud_cover = Some(v.clamp(0.0, 1.0)));
+            None
         }
         "brightness" => {
             let mut c=custom_state(app); c.brightness=v; app.set_custom_weather(c); None
@@ -1595,7 +1606,7 @@ pub(crate) fn dropdown_for(app: &App, row: usize, id: &str) -> Option<Dropdown> 
         }
         "cloudkind" => {
             current = app.weather.as_ref().and_then(|w| cloud_index(&w.clouds.0));
-            CLOUD_TYPES.iter().enumerate().map(|(i, (_, n))| (tr(*n), format!("cloud {i}"))).collect()
+            CLOUD_KINDS.iter().enumerate().map(|(i, k)| (tr(k.label), format!("cloud {i}"))).collect()
         }
         "precipkind" => {
             current = app.weather.as_ref().map(|w| (w.precip.first().copied().unwrap_or(0.0).max(0.0) as usize).min(PRECIP_KINDS.len() - 1));
@@ -1648,9 +1659,12 @@ pub(crate) fn dropdown_apply(app: &mut App, action: &str) {
             app.metar_next = 0.0;
         }
         "cloud" => {
-            if let Some(i) = arg.trim().parse::<usize>().ok().filter(|i| *i < CLOUD_TYPES.len()) {
+            if let Some(i) = arg.trim().parse::<usize>().ok().filter(|i| *i < CLOUD_KINDS.len()) {
                 app.edit_weather(|w| {
-                    w.clouds.0 = CLOUD_TYPES[i].0.to_string();
+                    w.clouds.0 = CLOUD_KINDS[i].id.to_string();
+                    // the kinds are points on the cover's own scale now, so picking one sets
+                    // the cover rather than only naming it
+                    w.cloud_cover = Some(CLOUD_KINDS[i].cover);
                     if i == 0 {
                         w.clouds.1 = 0.0;
                     }
@@ -2196,8 +2210,10 @@ fn world_pages(app: &App) -> Vec<Page> {
         if !app.metar_locked() {
             weather.push(button("Custom weather", "Edit current", "Freeze the weather currently in force and edit it as a custom weather.", "weather_custom"));
         }
-        let cloud = app.weather.as_ref().and_then(|w| cloud_index(&w.clouds.0)).map(|i| CLOUD_TYPES[i].1.to_string()).or_else(|| app.weather.as_ref().map(|w| w.clouds.0.trim().to_string())).unwrap_or_default();
-        weather.push((row("Clouds", 'o', &cloud, "The kind of clouds in the sky.", None), "cloudkind".to_string()));
+        // How much of the sky is covered: a slider, the way the launcher's panel has it. The
+        // five cloud types are still there (the palette's `cloud 0..4`, and the presets a
+        // weather file names), as the points this runs between.
+        weather.extend(slider_row(app, "cloud_cover", "Cloud cover", "How much of the sky the clouds cover.", &|v| if v <= 0.0 { "clear sky".into() } else { format!("{:.0} %", v * 100.0) }));
         weather.extend(slider_row(app, "visibility", "Visibility", "How far one can see; less is fog.", &|v| if v >= 1000.0 { format!("{:.1} km", v / 1000.0) } else { format!("{} m", v as i64) }));
         weather.extend(slider_row(app,"brightness","Brightness","Brightness of the custom weather lighting.",&|v|format!("{:.0} %",v*100.0)));
         let kind = app.weather.as_ref().map(|w| (w.precip.first().copied().unwrap_or(0.0).max(0.0) as usize).min(PRECIP_KINDS.len() - 1)).unwrap_or(0);

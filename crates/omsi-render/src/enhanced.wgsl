@@ -637,7 +637,9 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         } else if (nl > 0.0 || thin) {
             shadow = sun_shadow_soft(in.world, n, thin);
         }
-        let e_sun = enh.sun.rgb * shadow;
+        // and what the cloud overhead takes off it (a heap's shadow on the ground); the
+        // sky's own cover is already in `enh.sun` through `enh.lights.w`
+        let e_sun = enh.sun.rgb * shadow * cloud_shadow(in.world);
         if (thin) {
             // foliage: a crown of leaves facing every way, whose normals OMSI points up
             // only to light it evenly - lit by the sun from any side (the shadow map

@@ -15,6 +15,17 @@ pub struct Weather {
     pub temp: (f32, f32),
     pub pressure: f32,
     pub clouds: (String, f32),
+    /// Base and top of the cloud layer the enhanced renderer draws, metres (0, 0 = take
+    /// them from the cloud type). A `.owt`'s own `[clouds]` height is where Omsi.exe puts
+    /// its flat cloud texture - 50 to 200 m in the files that ship with the game - and not
+    /// a base any cumulus could stand on, so it is left out of this and only a weather
+    /// openOMSI builds itself (`custom:`) sets it.
+    pub cloud_layer: (f32, f32),
+    /// How much of the sky the clouds cover, 0..1; `None` = the cloud type in `clouds.0`
+    /// decides. openOMSI reads the cover as a continuous quantity - one slider from a clear
+    /// sky to a closed one - so a weather built by hand (`custom:`) sets this rather than
+    /// naming the nearest of the five kinds.
+    pub cloud_cover: Option<f32>,
     pub precip: Vec<f32>,
     pub ground_wet: [f32; 3],
     pub snow: bool,
