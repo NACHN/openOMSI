@@ -2,7 +2,85 @@
 
 use super::*;
 
-pub(crate) const CUSTOM_CLOUDS: [&str; 5] = ["No clouds", "Cumulus 1", "Cumulus 2", "Cumulus 3", "Overcast 1"];
+/// OMSI's cloud types, in one place: the name a weather file writes (`Weather/clouds.cfg`),
+/// the name the game shows for it, how much of the sky the type covers and the layer it
+/// stands in. Everything reads this - the game's own list (`game_lists`), the launcher's
+/// chooser, `clouds_of`, `cloud_layer_of` and the hand-set weather's index - so that one kind
+/// cannot mean two things. (It used to be written out five times, and the labels disagreed:
+/// the same sky was "Cumulus 3" in the launcher and "Broken" in the game.)
+///
+/// A `.owt`'s own height is still left out on purpose: Omsi.exe puts a flat cloud texture 50
+/// to 200 m up, and no cumulus stands there.
+pub(crate) struct CloudKind {
+    /// the name a weather file writes
+    pub id: &'static str,
+    /// the name the game's own weather editor shows
+    pub label: &'static str,
+    /// how much of the sky the type covers (0 = none)
+    pub cover: f32,
+    /// the layer it stands in (base, top above the ground), 0/0 = no clouds
+    pub layer: (f32, f32),
+}
+
+pub(crate) const CLOUD_KINDS: [CloudKind; 5] = [
+    CloudKind { id: "-1", label: "None", cover: 0.0, layer: (0.0, 0.0) },
+    CloudKind { id: "Cumulus 1", label: "Few clouds", cover: 0.35, layer: (1300.0, 2200.0) },
+    CloudKind { id: "Cumulus 2", label: "Scattered", cover: 0.55, layer: (900.0, 2600.0) },
+    CloudKind { id: "Cumulus 3", label: "Broken", cover: 0.75, layer: (600.0, 3400.0) },
+    CloudKind { id: "Overcast 1", label: "Overcast", cover: 1.0, layer: (400.0, 1500.0) },
+];
+
+/// The index in `CLOUD_KINDS` of the kind `name` names. Takes the name a weather file writes
+/// (`Overcast 1`), the bare kind without its number (`Overcast`), the game's own label
+/// (`Broken`), and the empty or `-1` a file writes for "no clouds". `None` for a name the
+/// table does not hold - a sky pack may bring its own kinds in `envir.cfg` - so the callers
+/// keep their own fallback rather than have a stranger's clouds vanish.
+pub(crate) fn cloud_kind_index(name: &str) -> Option<usize> {
+    let n = name.trim();
+    if n.is_empty() || n.starts_with("-1") || n.to_ascii_lowercase().starts_with("no cloud") {
+        return Some(0);
+    }
+    CLOUD_KINDS.iter().position(|k| {
+        k.id.eq_ignore_ascii_case(n)
+            || k.label.eq_ignore_ascii_case(n)
+            // `Overcast` where the file writes `Overcast 1`
+            || (!k.id.starts_with('-') && k.id.split_whitespace().next().is_some_and(|w| w.eq_ignore_ascii_case(n)))
+    })
+}
+
+/// The kind whose cover is nearest `cover`. A weather set by hand names no kind, but the
+/// `.owt` name it still carries in `clouds.0` comes from one.
+pub(crate) fn cloud_kind_nearest(cover: f32) -> usize {
+    let cover = cover.clamp(0.0, 1.0);
+    if cover <= 0.0 {
+        return 0;
+    }
+    // (the first entry is "no clouds": it is never the nearest kind of a sky that has any
+    // cloud at all, however light - only a kind that carries clouds is a picture to draw)
+    (1..CLOUD_KINDS.len())
+        .min_by(|a, b| (CLOUD_KINDS[*a].cover - cover).abs().total_cmp(&(CLOUD_KINDS[*b].cover - cover).abs()))
+        .unwrap_or(1)
+}
+
+/// The layer a cover stands in: the kinds' layers read off against the cover between them, so
+/// a cover drawn anywhere between two kinds carries the layer with it - fair weather's thin
+/// layer high up through to a storm's three-kilometre pile-up, the way the kinds' covers do.
+pub(crate) fn cloud_layer_for(cover: f32) -> (f32, f32) {
+    let cover = cover.clamp(0.0, 1.0);
+    let mut a = &CLOUD_KINDS[1];
+    for k in CLOUD_KINDS.iter().skip(1) {
+        if cover >= k.cover {
+            a = k;
+            continue;
+        }
+        let t = ((cover - a.cover) / (k.cover - a.cover).max(1e-4)).clamp(0.0, 1.0);
+        return (
+            a.layer.0 + (k.layer.0 - a.layer.0) * t,
+            a.layer.1 + (k.layer.1 - a.layer.1) * t,
+        );
+    }
+    a.layer
+}
 pub(crate) const CUSTOM_PRECIP: [&str; 3] = ["None", "Rain", "Snow"];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,8 +92,11 @@ pub(crate) struct CustomWeather {
     pub temp_c: f32,
     pub humidity: f32,
     pub pressure: f32,
-    pub cloud: usize,
+    /// How much of the sky the clouds cover, 0..1 (a slider: the sky reads it continuously).
+    pub cloud_cover: f32,
+    /// The cloud layer's base and top in metres; 0 = the cover decides (see `cloud_layer_of`).
     pub cloud_base_m: f32,
+    pub cloud_top_m: f32,
     pub precip: i32,
     pub precip_intensity: f32,
     pub road_wetness: f32,
@@ -25,7 +106,7 @@ pub(crate) struct CustomWeather {
 impl Default for CustomWeather {
     fn default() -> Self {
         Self { visibility_m: 50_000.0, brightness: 1.0, wind_dir: 0.0, wind_speed: 0.0,
-            temp_c: 15.0, humidity: 51.0, pressure: 1013.0, cloud: 0, cloud_base_m: 50.0,
+            temp_c: 15.0, humidity: 51.0, pressure: 1013.0, cloud_cover: 0.55, cloud_base_m: 0.0, cloud_top_m: 0.0,
             precip: 0, precip_intensity: 32.0, road_wetness: 0.0, snow_cover: false, snow_on_road: false }
     }
 }
@@ -38,8 +119,10 @@ impl CustomWeather {
         self.temp_c=self.temp_c.clamp(-40.0,50.0);
         self.humidity=self.humidity.clamp(0.0,100.0);
         self.pressure=self.pressure.clamp(900.0,1100.0);
-        self.cloud=self.cloud.min(CUSTOM_CLOUDS.len()-1);
-        self.cloud_base_m=self.cloud_base_m.clamp(50.0,5000.0);
+        self.cloud_cover=self.cloud_cover.clamp(0.0,1.0);
+        self.cloud_base_m=self.cloud_base_m.clamp(0.0,6000.0);
+        self.cloud_top_m=self.cloud_top_m.clamp(0.0,8000.0);
+        if self.cloud_top_m>0.0 && self.cloud_top_m<=self.cloud_base_m { self.cloud_top_m=self.cloud_base_m+200.0; }
         self.precip=self.precip.clamp(0,2);
         self.precip_intensity=self.precip_intensity.clamp(0.0,255.0);
         self.road_wetness=self.road_wetness.clamp(0.0,1.0);
@@ -58,8 +141,14 @@ impl CustomWeather {
                 "t"=>if let Some(v)=n{c.temp_c=v},
                 "rh"=>if let Some(v)=n{c.humidity=v},
                 "p"=>if let Some(v)=n{c.pressure=v},
-                "c"=>if let Some(v)=n{c.cloud=v.round().max(0.0) as usize},
+                // (the text says which build wrote it: an older one kept the index of a cloud
+                // type here and wrote it as a whole number - `c={}`, where this one writes
+                // `c={:.3}` - so a value with no point in it is that index, read back as its
+                // kind's cover. On the number alone an old `c=1` - Cumulus 1, a cover of 0.35 -
+                // was the 1.0 of a deck shut over the street)
+                "c"=>if let Some(v)=n{c.cloud_cover=if !value.trim().contains('.')||v>1.0{CLOUD_KINDS[(v.round().max(0.0) as usize).min(CLOUD_KINDS.len()-1)].cover}else{v}},
                 "cb"=>if let Some(v)=n{c.cloud_base_m=v},
+                "ct"=>if let Some(v)=n{c.cloud_top_m=v},
                 "pt"=>if let Some(v)=n{c.precip=v.round() as i32},
                 "pi"=>if let Some(v)=n{c.precip_intensity=v},
                 "wet"=>if let Some(v)=n{c.road_wetness=v},
@@ -72,27 +161,27 @@ impl CustomWeather {
     }
     pub(crate) fn encode(&self)->String{
         let mut c=self.clone(); c.normalize();
-        format!("custom:vis={:.0};br={:.2};wd={:.0};ws={:.1};t={:.1};rh={:.0};p={:.0};c={};cb={:.0};pt={};pi={:.0};wet={:.2};snow={};snowroad={}",
-            c.visibility_m,c.brightness,c.wind_dir,c.wind_speed,c.temp_c,c.humidity,c.pressure,c.cloud,c.cloud_base_m,
+        format!("custom:vis={:.0};br={:.2};wd={:.0};ws={:.1};t={:.1};rh={:.0};p={:.0};c={:.3};cb={:.0};ct={:.0};pt={};pi={:.0};wet={:.2};snow={};snowroad={}",
+            c.visibility_m,c.brightness,c.wind_dir,c.wind_speed,c.temp_c,c.humidity,c.pressure,c.cloud_cover,c.cloud_base_m,c.cloud_top_m,
             c.precip,c.precip_intensity,c.road_wetness,c.snow_cover as u8,c.snow_on_road as u8)
     }
     pub(crate) fn from_weather(w:&omsi_content::weather::Weather,brightness:f32,wetness:f32)->Self{
         let kind=w.clouds.0.trim().to_ascii_lowercase();
-        let cloud=if kind.starts_with("cumulus 1"){1}else if kind.starts_with("cumulus 2"){2}else if kind.starts_with("cumulus 3"){3}else if kind.starts_with("overcast"){4}else{0};
+        let cloud_cover=w.cloud_cover.unwrap_or_else(|| cloud_kind_index(&kind).map(|i| CLOUD_KINDS[i].cover).unwrap_or(0.5));
         let mut c=Self{
             visibility_m:w.fog.0,brightness,wind_dir:w.wind.0,wind_speed:w.wind.1,temp_c:w.temp.0,
             humidity:relative_humidity(w.temp.0,w.temp.1),pressure:if w.pressure>0.0{w.pressure}else{1013.0},
-            cloud,cloud_base_m:w.clouds.1.max(50.0),precip:w.precip.first().copied().unwrap_or(0.0).round() as i32,
+            cloud_cover,cloud_base_m:w.cloud_layer.0,cloud_top_m:w.cloud_layer.1,precip:w.precip.first().copied().unwrap_or(0.0).round() as i32,
             precip_intensity:w.precip.get(1).copied().unwrap_or(32.0),road_wetness:wetness,snow_cover:w.snow,snow_on_road:w.snow_on_road};
         c.normalize(); c
     }
     pub(crate) fn to_weather(&self)->omsi_content::weather::Weather{
         let mut c=self.clone(); c.normalize();
-        let cloud=match c.cloud{1=>"Cumulus 1",2=>"Cumulus 2",3=>"Cumulus 3",4=>"Overcast 1",_=>"-1"};
+        let cloud=CLOUD_KINDS[cloud_kind_nearest(c.cloud_cover)].id;
         omsi_content::weather::Weather{
             path:std::path::PathBuf::from(c.encode()),name:"Custom weather".into(),description:"User-defined weather".into(),
             fog:(c.visibility_m,1.0),wind:(c.wind_dir,c.wind_speed),temp:(c.temp_c,absolute_humidity(c.temp_c,c.humidity)),
-            pressure:c.pressure,clouds:(cloud.into(),c.cloud_base_m),precip:vec![c.precip as f32,c.precip_intensity,0.0,0.0,0.0],
+            pressure:c.pressure,clouds:(cloud.into(),c.cloud_base_m),cloud_layer:(c.cloud_base_m,c.cloud_top_m),cloud_cover:Some(c.cloud_cover),precip:vec![c.precip as f32,c.precip_intensity,0.0,0.0,0.0],
             ground_wet:[c.road_wetness*255.0,0.0,0.0],snow:c.snow_cover,snow_on_road:c.snow_on_road}
     }
 }
@@ -360,32 +449,54 @@ fn cloud_texture(root: &Path, kind: &str) -> Option<omsi_texture::Image> {
     Some(img)
 }
 
+/// The cover a weather means, 0..1: its own where it set one (a hand-set `custom:` weather
+/// draws it on a slider; the launcher's day-and-weather panel and the game's own weather row
+/// both write it), else its cloud type's. One definition, so the number the panel shows, the
+/// thickness of the sky and a blend's halfway point cannot come out three different things.
+pub(crate) fn cover_of(w: &omsi_content::weather::Weather) -> f32 {
+    if let Some(c) = w.cloud_cover {
+        return c.clamp(0.0, 1.0);
+    }
+    let kind = w.clouds.0.trim();
+    if kind.is_empty() || kind.starts_with("-1") {
+        return 0.0;
+    }
+    // (a name the table does not hold - a sky pack's own - keeps the middle of the road
+    // rather than turning the clouds off)
+    cloud_kind_index(kind).map(|i| CLOUD_KINDS[i].cover).unwrap_or(0.5)
+}
+
 /// Cloud cover of a weather file: `[clouds] type density`, type -1 = clear, density up to
 /// ~300 (Cumulus 3) - mapped to 0..1; the cover drifts with the wind.
 pub(crate) fn clouds_of(w: &omsi_content::weather::Weather, drift: [f32; 2]) -> (f32, [f32; 2]) {
-    let kind = w.clouds.0.trim();
-    if kind.is_empty() || kind.starts_with("-1") || !CLOUDS.load(std::sync::atomic::Ordering::Relaxed) {
+    if !CLOUDS.load(std::sync::atomic::Ordering::Relaxed) {
         return (0.0, [0.0; 2]);
     }
-    // cover by type: Cumulus 1..3 scattered → broken, Overcast closed
-    let lower = kind.to_ascii_lowercase();
-    let density = if lower.starts_with("overcast") {
-        1.0
-    } else if lower.starts_with("cumulus") {
-        match lower
-            .trim_start_matches("cumulus")
-            .trim()
-            .parse::<i32>()
-            .unwrap_or(1)
-        {
-            1 => 0.35,
-            2 => 0.55,
-            _ => 0.75,
-        }
-    } else {
-        0.5
-    };
-    (density, drift)
+    // The cover decides, not the name. A weather set by hand keeps the name of the kind its
+    // cover stands nearest to - which for a light cover used to be the "no clouds" kind, whose
+    // name switched the clouds off entirely: the sky was clear from 0 to 17 %, and a slider
+    // above that put a whole deck up at once. (The name still says which picture the weather
+    // is drawn with, so it has to be a kind that *has* clouds; `cloud_kind_nearest` sees to
+    // that.)
+    (cover_of(w), drift)
+}
+
+/// The cloud layer's base and top in metres for this weather: the weather's own where it set
+/// them (`custom:`, from the launcher's day-and-weather panel), else the layer the cloud type
+/// stands in (`CLOUD_KINDS`).
+pub(crate) fn cloud_layer_of(w: &omsi_content::weather::Weather) -> (f32, f32) {
+    if w.cloud_layer.0 > 0.0 && w.cloud_layer.1 > w.cloud_layer.0 {
+        return w.cloud_layer;
+    }
+    // (a hand-set cover carries its own layer: the kinds' read off against it)
+    if let Some(c) = w.cloud_cover {
+        return cloud_layer_for(c);
+    }
+    match cloud_kind_index(&w.clouds.0) {
+        // (the first entry is "no clouds": it has no layer of its own)
+        Some(i) if CLOUD_KINDS[i].layer.1 > 0.0 => CLOUD_KINDS[i].layer,
+        _ => (1000.0, 2400.0),
+    }
 }
 
 /// The clouds' drift after `time` seconds of a steady wind (see `cloud_drift_step`).
@@ -431,6 +542,9 @@ pub(crate) fn weather_lighting(
     let (density, offset) = clouds_of(w, cloud_drift);
     lighting.cloud_density = density;
     lighting.cloud_offset = offset;
+    let (base, top) = cloud_layer_of(w);
+    lighting.cloud_base = base;
+    lighting.cloud_top = top;
     let (kind, rate) = precip_of(w);
     lights::apply_weather(
         &mut lighting,
@@ -605,4 +719,51 @@ pub(crate) fn from_report(s: &str) -> Option<omsi_content::weather::Weather> {
     let mut w = omsi_content::weather::from_metar(icao, raw);
     w.path = std::path::PathBuf::from(format!("metar:{icao}"));
     Some(w)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `custom:` text an older build wrote kept the index of a cloud type in `c=` and wrote
+    /// it as a whole number, where this build writes the cover itself with three decimals:
+    /// read back, `c=1` has to be Cumulus 1's cover rather than the 1.0 of a shut deck.
+    #[test]
+    fn an_old_custom_texts_cloud_index_reads_back_as_its_kinds_cover() {
+        // the covers of the kinds in the order the table holds them - the order the old index
+        // was in (`CUSTOM_CLOUDS`: none, Cumulus 1..3, Overcast)
+        for (index, cover) in [0.0, 0.35, 0.55, 0.75, 1.0].into_iter().enumerate() {
+            let text = format!("custom:vis=20000;br=1.00;c={index}");
+            let c = CustomWeather::parse(&text).expect(&text);
+            assert!((c.cloud_cover - cover).abs() < 1e-6, "{text}: {} not {cover}", c.cloud_cover);
+        }
+        // (the one that came out wrong: Cumulus 1, a cover of 0.35, read as a shut deck)
+        assert!((CustomWeather::parse("custom:vis=20000;c=1").unwrap().cloud_cover - 0.35).abs() < 1e-6);
+
+        // and a cover this build wrote - always with a point in it - is a cover, not an index
+        for (text, cover) in [
+            ("custom:vis=20000;c=0.000", 0.0),
+            ("custom:vis=20000;c=0.550", 0.55),
+            ("custom:vis=20000;c=1.000", 1.0),
+        ] {
+            let c = CustomWeather::parse(text).expect(text);
+            assert!((c.cloud_cover - cover).abs() < 1e-6, "{text}: {} not {cover}", c.cloud_cover);
+        }
+    }
+
+    /// What `encode` writes parses back to the same weather: the round trip the launcher's own
+    /// summary, the game's weather row and a saved session all go through.
+    #[test]
+    fn a_custom_weather_survives_its_own_text() {
+        let c = CustomWeather {
+            cloud_cover: 1.0,
+            cloud_base_m: 400.0,
+            cloud_top_m: 1500.0,
+            ..CustomWeather::default()
+        };
+        let back = CustomWeather::parse(&c.encode()).expect("its own text");
+        assert!((back.cloud_cover - 1.0).abs() < 1e-6, "cover came back {}", back.cloud_cover);
+        assert!((back.cloud_base_m - 400.0).abs() < 1e-6);
+        assert!((back.cloud_top_m - 1500.0).abs() < 1e-6);
+    }
 }

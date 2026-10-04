@@ -33,6 +33,9 @@ struct Enhanced {
     // x how bright an LED panel's dots burn (0 = off), y whether the LED panels' `\S:n`
     // masks keep their mip chain (0: at full resolution, the dots stay visible when small)
     led: vec4<f32>,
+    // x the cloud layer's base above the ground (m), y its top, zw spare (the march's steps
+    // and the ground shadow's reading of the layer fill them where those are built)
+    cloud: vec4<f32>,
 };
 @group(0) @binding(11) var<uniform> enh: Enhanced;
 @group(0) @binding(13) var s_lin: sampler;
