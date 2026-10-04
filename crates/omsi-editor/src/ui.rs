@@ -23,7 +23,7 @@ use crate::start;
 use crate::view::View;
 use glam::{DVec3, Vec2};
 use omsi_editor_core::{Destination, Session};
-use omsi_render::Renderer;
+use omsi_render::{Mark, Renderer};
 use omsi_ui::paint::Align;
 use omsi_ui::tr;
 use omsi_ui::{Color, Draw, Gpu, Layer, Rect, Weight};
@@ -102,6 +102,25 @@ impl Tool {
             Tool::Raise => 'G',
             Tool::Flatten => 'H',
         }
+    }
+
+    /// What the outline says a click would do to the object under the pointer with this tool in
+    /// hand: a copy put down rings green, an object taken away rings red, and a tool that acts
+    /// on what it is given leaves the neutral amber (see `Mark`).
+    pub fn mark(self) -> Mark {
+        match self {
+            Tool::Place => Mark::Add,
+            Tool::Delete => Mark::Remove,
+            _ => Mark::Take,
+        }
+    }
+
+    /// The colour this tool is shown in, wherever it is shown: its button in the rail, the
+    /// line the status bar carries for it, and the ring it puts round what the pointer is on -
+    /// so that a colour means one thing in the panels and in the picture alike.
+    pub fn colour(self) -> Color {
+        let c = self.mark().colour();
+        Color::rgba(c[0], c[1], c[2], 1.0)
     }
 
     /// What the mouse does with this tool - the line the status bar carries.
@@ -607,14 +626,18 @@ impl Panels {
                 y += 13.0;
             }
             let slot = Rect::new(r.x + 11.0, y, 32.0, 32.0);
-            if self.tool == *tool {
+            // the tool in hand carries the colour its outline rings an object in, so that what
+            // a colour means in the picture is what it means on the button
+            let in_hand = self.tool == *tool;
+            if in_hand {
                 self.ui.p().rounded(slot, 8.0, SELECTED);
-                self.ui.p().rounded(Rect::new(slot.x, slot.y + 7.0, 2.0, slot.h - 14.0), 1.0, ACCENT);
+                self.ui.p().rounded(Rect::new(slot.x, slot.y + 7.0, 2.0, slot.h - 14.0), 1.0, tool.colour());
             }
             // the name is translated first: the tip goes through the drawing call as one
             // string, so `format!`ing it here would put "Move (M)" in the table instead
             let tip = format!("{} ({})", tr(tool.name()), tool.key());
-            if self.ui.icon_button(&format!("tool{}", tool.key()), slot.center(), 16.0, tool.icon(), &tip) {
+            let tint = in_hand.then(|| tool.colour());
+            if self.ui.icon_button_in(&format!("tool{}", tool.key()), slot.center(), 16.0, tool.icon(), &tip, tint) {
                 self.tool = *tool;
             }
             y += 38.0;
@@ -777,10 +800,12 @@ impl Panels {
         }
 
         // what the tool does, at the far end where nothing else goes - or, with a hand on the
-        // gizmo, what that hand is on
+        // gizmo, what that hand is on. The line is in the tool's own colour, the one its
+        // outline rings an object in: green while a click would put a copy down, red while it
+        // would take one away, amber for the rest.
         let (hint, colour) = match &info.holding {
             Some(name) => (tr(name), ACCENT),
-            None => (tr(self.tool.hint()), TEXT_DIM),
+            None => (tr(self.tool.hint()), self.tool.colour()),
         };
         let hint_w = self.ui.width(&hint, 11.5, Weight::Medium);
         self.ui.text_in(&hint, Rect::new(r.right() - 16.0 - hint_w - 4.0, r.y, hint_w + 4.0, r.h), 11.5, Weight::Medium, colour, Align::Right);

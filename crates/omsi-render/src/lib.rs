@@ -1012,17 +1012,57 @@ pub struct Instance {
     pub ordered: bool,
 }
 
-/// Why an instance is outlined: what the editor has pointed at, or what it has chosen.
+/// Why an instance is outlined, which is also what its ring is drawn in: what a click with the
+/// tool in hand would do to it, or what the editor has already chosen.
 ///
-/// The two are told apart only in the colour of the ring - amber under the pointer, white for
-/// what is chosen (see `outline.wgsl`) - but they are two because a chosen object under the
-/// pointer has to read as chosen.
+/// The editor's tools and its panels are coloured from the same four (`colour`), so that what
+/// green means in the picture is what it means on the button that puts it there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mark {
-    /// The object the pointer is over.
-    Hover,
+    /// Under the pointer, and a click would take it in hand: the neutral mark, and the one a
+    /// tool that acts on the ground leaves.
+    Take,
+    /// Under the pointer, and a click would put a copy of it down.
+    Add,
+    /// Under the pointer, and a click would take it out of the map.
+    Remove,
     /// The object that is chosen: what the tools act on.
     Chosen,
+}
+
+impl Mark {
+    /// Every mark, in the order the mask pass draws them: the chosen one last, over the rest.
+    pub const ALL: [Mark; 4] = [Mark::Take, Mark::Add, Mark::Remove, Mark::Chosen];
+
+    /// The ring's colour, as the bytes an interface writes one as.
+    ///
+    /// The interface's own amber, green, red and white (`ACCENT`, `OK`, `DANGER` and `TEXT` in
+    /// `omsi-app`'s theme), spelled out here because this crate sits below them and the ring
+    /// has to agree with the button that put it there. The ring draws them as light - the
+    /// picture's target is an sRGB one, see `srgb_to_linear`.
+    pub const fn colour(self) -> [u8; 3] {
+        match self {
+            Mark::Take => [232, 160, 48],
+            Mark::Add => [104, 190, 118],
+            Mark::Remove => [222, 78, 68],
+            Mark::Chosen => [236, 236, 236],
+        }
+    }
+}
+
+/// A colour written the way an interface writes one (its bytes), as the value a shader has to
+/// draw with: the target is an sRGB one, so what a fragment shader returns is taken as linear
+/// light and encoded on the way out.
+fn srgb_to_linear(c: [u8; 3]) -> [f32; 4] {
+    let f = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.040_45 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [f(c[0]), f(c[1]), f(c[2]), 1.0]
 }
 
 pub struct Scene {
@@ -1288,10 +1328,10 @@ pub struct Renderer {
     sky_mesh: (wgpu::Buffer, wgpu::Buffer, u32),
     overlay_pipeline: wgpu::RenderPipeline,
     overlay_layout: wgpu::BindGroupLayout,
-    /// The editor's outline: the marked instances drawn into a mask of their own - amber ones
-    /// first, the chosen one over them - and then the ring round them, over the picture.
-    /// Nothing is drawn through either of these while `Scene::outline` is empty.
-    outline_mark_pipelines: [wgpu::RenderPipeline; 2],
+    /// The editor's outline: the marked instances drawn into a mask of their own - one
+    /// pipeline a mark, in `Mark::ALL`'s order - and then the ring round them, over the
+    /// picture. Nothing is drawn through either of these while `Scene::outline` is empty.
+    outline_mark_pipelines: [wgpu::RenderPipeline; 4],
     outline_show_pipeline: wgpu::RenderPipeline,
     outline_layout: wgpu::BindGroupLayout,
     outline_buf: wgpu::Buffer,
@@ -2374,9 +2414,10 @@ impl Renderer {
         // The editor's outline (see `Scene::outline`): the marked instances drawn flat into a
         // mask, and then the ring round them over the finished picture.
         //
-        // Two mark pipelines rather than one taking the value in a uniform: what a pixel of
-        // the mask holds is which list the instance was drawn from, and the encoders already
-        // know which list that is.
+        // One pipeline to a mark rather than one taking the mark in a uniform: which channel a
+        // pixel of the mask holds is what the mark *is*, and the encoders already know which
+        // mark each instance is drawn for. The order is `Mark::ALL`'s, which is also the order
+        // the colour constants are in on the other side.
         let outline_mark = |entry: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("outline mark"),
@@ -2409,7 +2450,12 @@ impl Renderer {
                 cache: None,
             })
         };
-        let outline_mark_pipelines = [outline_mark("fs_outline"), outline_mark("fs_outline_chosen")];
+        let outline_mark_pipelines = [
+            outline_mark("fs_outline"),
+            outline_mark("fs_outline_add"),
+            outline_mark("fs_outline_remove"),
+            outline_mark("fs_outline_chosen"),
+        ];
         let outline_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("outline"),
             entries: &[
@@ -2479,7 +2525,8 @@ impl Renderer {
         });
         let outline_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("outline params"),
-            size: 16,
+            // the two texel sizes of `texel`, then a colour to each of `Mark::ALL`
+            size: 16 + 16 * 4,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -8735,13 +8782,13 @@ impl Renderer {
         // added here is a list pointing at them - and the list is built before it is uploaded,
         // so its buffer is grown to hold them.
         //
-        // The amber ones first and the chosen one over them, so that a pixel of the mask
-        // holds the strongest mark there is: that is what makes a chosen object still read as
-        // chosen under the pointer, which is the whole reason the mask holds two values.
+        // The marks are drawn a kind at a time, in `Mark::ALL`'s order - the chosen one last,
+        // over the rest - so that where two objects overlap in the mask the later kind's
+        // channel is the one left standing.
         let outline_marked = with_overlays && !scene.outline.is_empty();
         let mut outline_draws: Vec<OutlineDraw> = Vec::new();
         if outline_marked {
-            for (wanted, chosen) in [(Mark::Hover, false), (Mark::Chosen, true)] {
+            for wanted in Mark::ALL {
                 for &(instance, mark) in &scene.outline {
                     if mark != wanted {
                         continue;
@@ -8759,7 +8806,7 @@ impl Renderer {
                             first,
                             count,
                             material,
-                            chosen,
+                            mark: wanted as u8,
                         });
                         list.push(inst.base + slot);
                     }
@@ -8838,15 +8885,15 @@ impl Renderer {
                     });
                     pass.set_bind_group(0, camera_bg, &[]);
                     // `None` and not a mark: the first draw has to set the pipeline whatever
-                    // kind it is - a sentinel of `false` would equal a mark under the pointer,
-                    // and the draw that followed it went out with no pipeline at all (which
-                    // wgpu answers by throwing the whole frame's commands away: the editor's
-                    // picture went black the moment the pointer came near an object)
-                    let (mut pipe, mut mesh, mut material): (Option<bool>, u32, u32) = (None, u32::MAX, u32::MAX);
+                    // kind it is - a sentinel that could equal a mark left that draw with no
+                    // pipeline at all, which wgpu answers by throwing the whole frame's
+                    // commands away (the editor's picture went black the moment the pointer
+                    // came near an object)
+                    let (mut pipe, mut mesh, mut material): (Option<u8>, u32, u32) = (None, u32::MAX, u32::MAX);
                     for d in &outline_draws {
-                        if Some(d.chosen) != pipe {
-                            pass.set_pipeline(&self.outline_mark_pipelines[d.chosen as usize]);
-                            pipe = Some(d.chosen);
+                        if Some(d.mark) != pipe {
+                            pass.set_pipeline(&self.outline_mark_pipelines[d.mark as usize]);
+                            pipe = Some(d.mark);
                         }
                         if d.mesh != mesh {
                             let m = &scene.meshes[d.mesh as usize];
@@ -9598,14 +9645,16 @@ impl Renderer {
         // picture that is finished by now - after the tone mapping and the HUD's own scale, so
         // that what is outlined is not graded along with the world it stands in.
         if let Some(mask_bg) = outline_mask.as_ref() {
-            // one mask texel, and one picture pixel, in the uv the shader works in (see
-            // `outline.wgsl`)
-            let params = [
-                1.0 / width.max(1) as f32,
-                1.0 / height.max(1) as f32,
-                1.0 / full_w.max(1) as f32,
-                1.0 / full_h.max(1) as f32,
-            ];
+            // one mask texel, and one picture pixel, in the uv the shader works in, and then
+            // what each mark rings in (see `outline.wgsl`)
+            let mut params = [0.0f32; 20];
+            params[0] = 1.0 / width.max(1) as f32;
+            params[1] = 1.0 / height.max(1) as f32;
+            params[2] = 1.0 / full_w.max(1) as f32;
+            params[3] = 1.0 / full_h.max(1) as f32;
+            for (i, mark) in Mark::ALL.iter().enumerate() {
+                params[4 + i * 4..8 + i * 4].copy_from_slice(&srgb_to_linear(mark.colour()));
+            }
             self.queue.write_buffer(&self.outline_buf, 0, bytemuck::cast_slice(&params));
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("outline"),
@@ -10550,8 +10599,9 @@ struct OutlineDraw {
     first: u32,
     count: u32,
     material: u32,
-    /// The chosen object rather than the one under the pointer: which value the mask holds.
-    chosen: bool,
+    /// Which mark is drawn here: an index into `Mark::ALL`, and the pipeline that writes the
+    /// mark's own channel of the mask.
+    mark: u8,
 }
 
 /// Turn draw items into batches, appending their entries to `list`. `sort`: the order does

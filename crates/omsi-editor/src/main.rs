@@ -358,7 +358,7 @@ fn ui_shot(
             // that is chosen, so that a shot shows the ring a window would
             let chosen = session.selected_id().filter(|_| !hover);
             let under = hover.then(|| session.selected_id()).flatten();
-            crate::window::mark_outline(&mut scene, view.world(), &shown, under, chosen);
+            crate::window::mark_outline(&mut scene, view.world(), &shown, under, chosen, panels.tool);
             // the map goes under the panels, in the same target, before they are drawn over it
             let target = renderer.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("editor ui shot"),

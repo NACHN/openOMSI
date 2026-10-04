@@ -1782,18 +1782,41 @@ fn outline_is_cut(in: OutlineIn) -> bool {
     return a < 0.5;
 }
 
-@fragment
-fn fs_outline(in: OutlineIn) -> @location(0) vec4<f32> {
+// A pixel of the mask says which mark is there, one channel each: red under a pointer that
+// would take the object in hand, green for one that would put a copy down, blue for one that
+// would take it away, and alpha for the object that is chosen. A channel each rather than a
+// number, because the mask is `Rgba8Unorm` - a mark written as 2 comes back as 1, which is
+// how a chosen object and one under the pointer once came to look alike.
+//
+// Only the channel that is the mark is set: a pointer's mark leaves alpha at nought, or a
+// pixel under the pointer reads as a pixel of the chosen object and rings in its colour.
+fn outline_mark(channel: vec4<f32>, in: OutlineIn) -> vec4<f32> {
     if (outline_is_cut(in)) {
         discard;
     }
-    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+    return channel;
+}
+
+@fragment
+fn fs_outline(in: OutlineIn) -> @location(0) vec4<f32> {
+    // under the pointer, with a click that would take it in hand
+    return outline_mark(vec4<f32>(1.0, 0.0, 0.0, 0.0), in);
+}
+
+@fragment
+fn fs_outline_add(in: OutlineIn) -> @location(0) vec4<f32> {
+    // under the pointer, with a click that would put a copy there
+    return outline_mark(vec4<f32>(0.0, 1.0, 0.0, 0.0), in);
+}
+
+@fragment
+fn fs_outline_remove(in: OutlineIn) -> @location(0) vec4<f32> {
+    // under the pointer, with a click that would take it out of the map
+    return outline_mark(vec4<f32>(0.0, 0.0, 1.0, 0.0), in);
 }
 
 @fragment
 fn fs_outline_chosen(in: OutlineIn) -> @location(0) vec4<f32> {
-    if (outline_is_cut(in)) {
-        discard;
-    }
-    return vec4<f32>(0.0, 1.0, 0.0, 1.0);
+    // the object the editor has chosen
+    return outline_mark(vec4<f32>(0.0, 0.0, 0.0, 1.0), in);
 }

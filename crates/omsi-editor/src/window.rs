@@ -55,17 +55,16 @@ struct Drag {
     from: DVec3,
 }
 
-/// Put the outline's marks on the scene: the object under the pointer in amber, the one that
-/// is chosen in white (see `Scene::outline`).
+/// Put the outline's marks on the scene: the object under the pointer in the colour of what a
+/// click would do to it, and the one that is chosen in white (see `Scene::outline`).
 ///
 /// The chosen one comes last, and the renderer draws the marks in that order, so a chosen
-/// object under the pointer is drawn white over its own amber - which is what makes the two
-/// colours answer "what would a click take" and "what has it taken" without either hiding the
-/// other.
-pub(crate) fn mark_outline(scene: &mut Scene, world: &host::World, shown: &Shown, hover: Option<i64>, chosen: Option<i64>) {
+/// object under the pointer is drawn over its own pointer mark - which is what makes the two
+/// answer "what would a click take" and "what has it taken" without either hiding the other.
+pub(crate) fn mark_outline(scene: &mut Scene, world: &host::World, shown: &Shown, pointer: Option<i64>, chosen: Option<i64>, tool: Tool) {
     scene.outline.clear();
-    for (id, mark) in [(hover, Mark::Hover), (chosen, Mark::Chosen)] {
-        let Some(id) = id else { continue };
+    let marks = [pointer.map(|id| (id, tool.mark())), chosen.map(|id| (id, Mark::Chosen))];
+    for (id, mark) in marks.into_iter().flatten() {
         for instance in shown.instances_of(world, id) {
             scene.outline.push((instance as u32, mark));
         }
@@ -394,7 +393,7 @@ impl Editor {
                         host::pick(view.world(), scene, eye, dir.as_vec3())
                     })
                     .flatten();
-                mark_outline(scene, view.world(), &self.shown, hover, session.selected_id());
+                mark_outline(scene, view.world(), &self.shown, hover, session.selected_id(), tool);
                 // where the gizmo is, for the frame that has to pick a handle on it: the one
                 // that was just drawn rather than one worked out again later. While a drag is
                 // in hand the frozen one is the one in use.

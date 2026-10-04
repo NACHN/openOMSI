@@ -495,12 +495,19 @@ impl Ui {
 
     /// A round button with only an icon.
     pub fn icon_button(&mut self, name: &str, c: Vec2, r: f32, icon: &str, tip: &str) -> bool {
+        self.icon_button_in(name, c, r, icon, tip, None)
+    }
+
+    /// A button with an icon, drawn in `tint` while the pointer is not on it (`TEXT_DIM` when
+    /// there is none). The editor's rail tints the tool in hand with the colour its outline
+    /// rings an object in, so the button and the ring say the same thing.
+    pub fn icon_button_in(&mut self, name: &str, c: Vec2, r: f32, icon: &str, tip: &str, tint: Option<Color>) -> bool {
         let id = id_of(name);
         let rect = Rect::new(c.x - r, c.y - r, 2.0 * r, 2.0 * r);
         let (h, _, clicked) = self.interact(id, rect);
         let t = self.anim(id, if h { 1.0 } else { 0.0 }, 0.08);
         self.p().circle(c, r, Color::WHITE.alpha(0.06 * t));
-        self.icon(icon, c, r * 1.1, if h { TEXT } else { TEXT_DIM });
+        self.icon(icon, c, r * 1.1, if h { TEXT } else { tint.unwrap_or(TEXT_DIM) });
         if !tip.is_empty() {
             self.tooltip(rect, tip);
         }
