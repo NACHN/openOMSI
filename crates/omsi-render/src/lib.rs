@@ -101,6 +101,10 @@ struct EnhancedUniform {
     /// x how bright an LED panel's dots burn (`Lighting::led_glow`), y how much of the
     /// mip chain an LED panel is held at (`Lighting::led_mips`)
     led: [f32; 4],
+    /// x the cloud layer's base above the ground (m), y its top - the layer the weather
+    /// puts the enhanced clouds in (`Lighting::cloud_base`/`cloud_top`); zw are for the
+    /// march's own steps and for the ground shadow's reading of the layer, and 0 here.
+    cloud: [f32; 4],
 }
 
 /// High-range colour targets of the enhanced path for one size: the multisampled one the
@@ -581,6 +585,11 @@ pub struct Lighting {
     /// Cloud layer: density 0..1 and the texture offset (wind drift), 0 = no clouds.
     pub cloud_density: f32,
     pub cloud_offset: [f32; 2],
+    /// The cloud layer's base and top above the map's ground, in metres: the enhanced
+    /// renderer's clouds stand between them, so a weather may set a low thick ceiling or a
+    /// high thin fair-weather layer (see `weather_setup::cloud_layer_of`).
+    pub cloud_base: f32,
+    pub cloud_top: f32,
     /// Sun shadow map (off in mirrors and at night).
     pub shadows: bool,
     /// How wet the roads are (0..1): rain darkens them and makes them mirror the sky.
@@ -663,6 +672,8 @@ impl Default for Lighting {
             sky_weights: [1.0, 0.0, 0.0],
             cloud_density: 0.0,
             cloud_offset: [0.0; 2],
+            cloud_base: 1400.0,
+            cloud_top: 2800.0,
             shadows: true,
             wetness: 0.0,
             snow: 0.0,
@@ -6690,6 +6701,14 @@ impl Renderer {
             // 16 levels give 0 = off .. 3.75), y whether the LED panels' `\S:n` masks keep
             // their mip chain (0: at full resolution, the dots stay visible when small)
             led: [lighting.led_glow, lighting.led_mips, 0.0, 0.0],
+            cloud: [
+                lighting.cloud_base.max(50.0),
+                lighting.cloud_top.max(lighting.cloud_base.max(50.0) + 100.0),
+                // (zw: the march's own steps and the ground shadow's reading of the layer,
+                // which the clouds' quality setting fills in and the shadow's branch adds)
+                0.0,
+                0.0,
+            ],
         };
         self.queue
             .write_buffer(&self.enh_buf, 0, bytemuck::bytes_of(&u));
@@ -10455,6 +10474,25 @@ fn sun_through_fog(sigma: f32, sun_z: f32) -> f32 {
     (-sigma / (FOG_FALLOFF * sun_z.max(0.02))).exp()
 }
 
+/// How much of the sun a sky of this cloud cover lets down to the street (1 a clear sky, 0 a
+/// deck shut over it): the one reading of the cover the enhanced sun's light is taken from,
+/// out of the same field the clouds themselves are drawn from (`camera.clouds.x` in the
+/// shaders, `Lighting::cloud_density` here) - so the sunlight and the cloud cannot come
+/// apart, a shut deck being no sun at all and no gap to see one through.
+///
+/// Cloud is a thing in the way of the sun rather than a dimmer on it: a cover of `c` stands
+/// between the street and about `c` of the sun, and nine tenths of it is all the cloud ever
+/// takes - the light that fills the bright side of a heap is one the street can see through
+/// the gaps. The last of the slider is the deck closed over: from a cover of 0.85 the sky
+/// shader draws the grey dome, and none of the sun is left to reach the ground, as its disc
+/// in the sky already showed (#1106).
+pub fn sun_through_cover(cover: f32) -> f32 {
+    let c = cover.clamp(0.0, 1.0);
+    let blocked = atmosphere::smoothstep(0.15, 0.95, c); // the cloud in the way of the sun
+    let shut = atmosphere::smoothstep(0.85, 1.0, c); // the deck closed over it
+    (1.0 - 0.9 * blocked) * (1.0 - shut)
+}
+
 /// What the enhanced sky is computed from for this light, and how much of the sun the
 /// clouds let through (the sky shader's `lights.w`, which lights the clouds and the disc).
 fn enhanced_sky_input(lighting: &Lighting) -> (atmosphere::SkyInput, f32) {
@@ -10466,13 +10504,14 @@ fn enhanced_sky_input(lighting: &Lighting) -> (atmosphere::SkyInput, f32) {
     // gone and the sky is the grey dome (a low sun scattered orange in the snowfall)
     let wet_cover = (lighting.rain * 1.5).clamp(0.0, 1.0);
     let sun_visibility = lighting.sun_intensity.clamp(0.0, 1.0) * (1.0 - wet_cover);
-    // The sun the street gets: none from under an overcast deck (from a cover of 0.85 on
-    // the sky shader draws the closed grey dome, `closed` in `cloud_layer`), and in a
-    // weather fog only what the fog above lets through - its disc in the sky is dimmed by
-    // the same layer. With the whole of it, an overcast day lit the street with a sun no
+    // The sun the street gets: what the cloud cover lets down (`sun_through_cover`, the one
+    // reading of the cover the clouds and the shadow they throw are read from as well), and
+    // in a weather fog only what the fog above lets through - its disc in the sky is dimmed
+    // by the same layer. With the whole of it, an overcast day lit the street with a sun no
     // one saw, and a dense fog glowed white all round the sun (#1106).
-    let closed = atmosphere::smoothstep(0.85, 1.0, lighting.cloud_density);
-    let reaching = sun_visibility * (1.0 - closed) * sun_through_fog(enhanced_weather_fog(lighting), s.z);
+    let reaching = sun_visibility
+        * sun_through_cover(lighting.cloud_density)
+        * sun_through_fog(enhanced_weather_fog(lighting), s.z);
     let input = atmosphere::SkyInput {
         sun_dir: s,
         sun_visibility: reaching,
@@ -11724,8 +11763,10 @@ mod tests {
         let reaching = |l: &Lighting| enhanced_sky_input(l).0.sun_visibility;
         // #CAVOK, a cumulus sky, Sommerlich's summer haze of 2 km
         assert!(reaching(&light(50_000.0, 0.0, 1.0)) > 0.99);
-        assert!(reaching(&light(50_000.0, 0.75, 0.54)) > 0.53);
-        assert!(reaching(&light(2_000.0, 0.35, 1.0)) > 0.4);
+        // a three-quarter sky over a summer's haze: the street keeps a seventh of the sun,
+        // out of the cover it and the clouds are both read from
+        assert!(reaching(&light(50_000.0, 0.75, 0.54)) < 0.2);
+        assert!(reaching(&light(2_000.0, 0.35, 1.0)) > 0.3);
         // Bodennebel's 75 m, Schmuddelwetter's 200 m: the sun is gone
         assert!(reaching(&light(75.0, 0.0, 1.0)) < 1e-4);
         assert!(reaching(&light(200.0, 0.0, 1.0)) < 1e-3);
@@ -11734,6 +11775,32 @@ mod tests {
         let (input, clouds) = enhanced_sky_input(&light(50_000.0, 1.0, 0.15));
         assert_eq!(input.sun_visibility, 0.0);
         assert!((clouds - 0.15).abs() < 1e-6);
+    }
+
+    /// The sun's light on the street and the clouds are read from one and the same cover -
+    /// the field the scene uniform's `clouds.x` carries into `camera.clouds.x`, which the
+    /// sky shader takes its `cloud_coverage` from - so the two can never come apart: a shut
+    /// deck is no sun and every heap drawn, a clear sky the sun and none of them.
+    #[test]
+    fn the_sun_and_the_clouds_are_read_from_the_same_cover() {
+        assert_eq!(sun_through_cover(0.0), 1.0);
+        assert_eq!(sun_through_cover(1.0), 0.0);
+        // and the light never comes back as the cover grows
+        for step in 0..40 {
+            let c = step as f32 * 0.025;
+            assert!(sun_through_cover(c) >= sun_through_cover((c + 0.025).min(1.0)), "cover {c}");
+        }
+        // `enhanced_sky_input` reads that field, not another reading of the weather
+        for cover in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let l = Lighting {
+                sun_dir: Vec3::new(-0.89, 0.0, 0.454),
+                sun_intensity: 1.0,
+                cloud_density: cover,
+                ..Default::default()
+            };
+            let (input, _) = enhanced_sky_input(&l);
+            assert!((input.sun_visibility - sun_through_cover(cover)).abs() < 1e-6, "cover {cover}");
+        }
     }
 
     #[test]
