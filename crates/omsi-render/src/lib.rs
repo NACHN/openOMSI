@@ -8707,12 +8707,22 @@ impl Renderer {
                 vis_surf
             );
         }
+        let has_presurface = visible.iter().any(|&(i, _, _)| scene.instances[i].presurface);
+        // Whether the occlusion pass may put a blended surface into its depth buffer: it may
+        // while that depth is its own. When the main pass borrows it (`share_depth` below
+        // repeats these same terms) it may not, because in the colour pass a blended surface
+        // must not occlude the layers behind it - a road's feathered junction would become a
+        // depth wall the next road layer composes behind.
+        let ao_solids = ao_may_see_solids(prepass_on, self.options.msaa, self.ao.is_some(), has_presurface, puddles_wanted)
+            && omsi_cfg::env::var_os("OMSI_NO_AO_SOLIDS").is_none();
         // the depth prepass: opaque and alpha-tested, single-sampled
         let mut prepass_batches: Vec<Batch> = Vec::new();
         let prepass_job = || -> (Vec<u32>, Vec<Batch>) {
             let mut items: Vec<DrawItem> = Vec::new();
             let mut list: Vec<u32> = Vec::new();
             let mut batches: Vec<Batch> = Vec::new();
+            let mut blends_in = 0usize;
+            let mut blends_out = 0usize;
             for &(i, _, _) in &visible {
                 let inst = &scene.instances[i];
                 let cull = culls_back_faces(scene, inst);
@@ -8720,13 +8730,22 @@ impl Renderer {
                     let mat_id = inst.materials.get(*slot as usize).copied().unwrap_or(0);
                     let mat = &scene.materials[mat_id];
                     let kind = kind_of(mat.alpha);
-                    // Ground blends compose before they may occlude later scenery.
-                    // The transmap body prepass is for ordinary meshes, not these
-                    // authored surface layers (including their terrain brush masks).
-                    if kind == PIPE_BLEND && world_surface_phase(effective_render_phase(inst)) {
+                    // Ground blends compose before they may occlude later scenery, so the
+                    // colour pass never lets them write depth. This is not the colour pass:
+                    // the occlusion pass's depth is its own, and a pavement's spline is the
+                    // very surface its occlusion is worked out on - left out, the pavement
+                    // and everything standing on it wear none of it.
+                    let surface_blend = kind == PIPE_BLEND && world_surface_phase(effective_render_phase(inst));
+                    if surface_blend && !ao_solids {
                         continue;
                     }
-                    if let Some(pre_kind) = depth_prepass_kind(kind, mat, inst.presurface) {
+                    if kind >= PIPE_BLEND {
+                        blends_out += 1;
+                    }
+                    if let Some(pre_kind) = depth_prepass_kind(kind, mat, inst.presurface, ao_solids) {
+                        if kind >= PIPE_BLEND {
+                            blends_in += 1;
+                        }
                         // plain/alpha-tested materials use their ordinary depth pass;
                         // blended transmaps use the opaque-pixels-only pass.
                         items.push(DrawItem {
@@ -8740,6 +8759,9 @@ impl Renderer {
                 }
             }
             batch_items(scene, &mut items, true, &mut list, &mut batches);
+            if omsi_cfg::env::var_os("OMSI_DEBUG_AO_SOLIDS").is_some() {
+                log::info!("prepass: {} items; blended draws offered {blends_out}, taken {blends_in}; ao_solids {ao_solids}", items.len());
+            }
             (list, batches)
         };
         // The main pass follows the authored world phases. Each phase keeps its
@@ -8755,7 +8777,6 @@ impl Renderer {
         // Keep mesh/material order here: an excavation's floor is drawn before its
         // invisible cover writes depth. Sorting its blended cover after the terrain
         // leaves the terrain's colour in place even though the cover writes depth.
-        let has_presurface = visible.iter().any(|&(i, _, _)| scene.instances[i].presurface);
         let mut prepass_found: Option<(Vec<u32>, Vec<Batch>)> = None;
         let pool = self.encoding_pool.as_ref();
         in_scope(pool, |scope| {
@@ -11089,9 +11110,17 @@ fn surface_depth_coverage(phase: RenderPhase, alpha: AlphaMode, transmap: bool, 
 /// no prepass because its fragments are see-through; a transmap is the useful exception:
 /// fully opaque texels are usually the vehicle body while lower-alpha texels are its windows.
 /// Presurfaces also contribute fully transparent blended texels, which seal the ground.
-/// Materials explicitly marked no-Z-write/no-Z-check remain excluded, just as they are from
-/// the ordinary prepass.
-fn depth_prepass_kind(kind: u8, material: &Material, presurface: bool) -> Option<u8> {
+/// Materials explicitly marked no-Z-check remain excluded, just as they are from the
+/// ordinary prepass (no-Z-write is a rule for the colour pass only, see `solids`).
+///
+/// `solids` is the occlusion pass asking for the blended surfaces themselves - a pavement's
+/// spline, a bus body whose windows share its material, the inside of its cockpit - because
+/// its depth buffer is its own (see `ao_solids` at the call site): without them the occlusion
+/// is never worked out *on* those surfaces, and they occlude nothing, so the ground beside a
+/// bus and every panel of the bus itself stay unoccluded. `fs_shadow_test` decides per pixel
+/// what is solid: for a blended material that is its transmap, since a blended body's diffuse
+/// alpha is commonly a paint gloss value (0.03) rather than coverage.
+fn depth_prepass_kind(kind: u8, material: &Material, presurface: bool, solids: bool) -> Option<u8> {
     if material.no_z_check {
         return None;
     }
@@ -11103,9 +11132,27 @@ fn depth_prepass_kind(kind: u8, material: &Material, presurface: bool) -> Option
         Some(PIPE_OPAQUE)
     } else if kind == PIPE_BLEND && material.transmap.is_some() && !material.no_z_write {
         Some(2)
+    } else if solids {
+        // The occlusion pass's own depth, so the colour pass's rule that a blended surface
+        // must not write depth does not apply here: it wants to know where the surfaces are,
+        // and OMSI content marks nearly every blended material no-Z-write. (`no_z_check`
+        // still excludes a material outright: an overlay that must never be depth-tested is
+        // not a surface either.) `fs_shadow_test` decides per pixel what is solid, and for a
+        // blended material that is its transmap - a body's diffuse alpha is a paint gloss
+        // value (0.03), not coverage, so without a transmap it counts as solid.
+        Some(PIPE_ALPHA_TEST)
     } else {
         None
     }
+}
+
+/// Whether the occlusion pass may treat blended surfaces as solid geometry in its depth
+/// buffer. It may while that depth buffer is its own; when the main pass borrows it
+/// (`share_depth`, which repeats these same terms) it may not, because in the colour pass a
+/// blended surface must not occlude the layers behind it - a road's feathered junction would
+/// become a depth wall that the next road layer composes behind.
+fn ao_may_see_solids(prepass_on: bool, msaa: u32, ao: bool, has_presurface: bool, puddles: bool) -> bool {
+    !(prepass_on && msaa <= 1 && ao && !has_presurface && !puddles)
 }
 
 fn instance_depth_bias(instance: &Instance, material: &Material) -> bool {
@@ -12739,6 +12786,19 @@ mod tests {
         let order = RenderPhase::DRAW_ORDER;
         assert!(order.iter().position(|p| *p == RenderPhase::OnSurface).unwrap()
             < order.iter().position(|p| *p == RenderPhase::BeforeNormal).unwrap());
+    }
+
+    #[test]
+    fn the_occlusion_pass_takes_blended_solids_only_while_its_depth_is_its_own() {
+        // the multisampled case: the AO depth is nobody else's, so the pavement's spline and a
+        // bus body may be in it
+        assert!(ao_may_see_solids(true, 4, true, false, false));
+        assert!(!ao_may_see_solids(true, 1, true, false, false));
+        // any of the terms that cancel sharing leaves it the occlusion pass's own
+        assert!(ao_may_see_solids(true, 1, true, false, true));
+        assert!(ao_may_see_solids(true, 1, true, true, false));
+        assert!(ao_may_see_solids(true, 1, false, false, false));
+        assert!(ao_may_see_solids(false, 1, true, false, false));
     }
 
     #[test]
