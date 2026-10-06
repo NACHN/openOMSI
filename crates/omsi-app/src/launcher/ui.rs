@@ -386,23 +386,10 @@ impl Ui {
 
     /// Several lines broken at spaces to `width`; returns the height used.
     pub fn paragraph(&mut self, text: &str, at: Vec2, width: f32, px: f32, weight: Weight, c: Color) -> f32 {
-        let text = &*omsi_ui::tr(text);
         let lh = px * 1.38;
         let mut y = at.y + px;
         let mut n = 0;
-        for para in text.split('\n') {
-            let mut line = String::new();
-            for word in para.split(' ') {
-                let t = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-                if self.fonts.width(&t, px, weight) > width && !line.is_empty() {
-                    self.text(&line, Vec2::new(at.x, y), px, weight, c, Align::Left);
-                    y += lh;
-                    n += 1;
-                    line = word.to_string();
-                } else {
-                    line = t;
-                }
-            }
+        for line in self.wrap(text, width, px, weight) {
             self.text(&line, Vec2::new(at.x, y), px, weight, c, Align::Left);
             y += lh;
             n += 1;
@@ -412,23 +399,63 @@ impl Ui {
 
     /// Height `paragraph` would take.
     pub fn paragraph_height(&self, text: &str, width: f32, px: f32, weight: Weight) -> f32 {
-        let text = &*omsi_ui::tr(text);
         let lh = px * 1.38;
-        let mut n = 0;
+        self.wrap(text, width, px, weight).len() as f32 * lh
+    }
+
+    /// The lines a paragraph is drawn on: broken at spaces, and - where one word is wider than
+    /// a line can hold - at the character that stops fitting.
+    ///
+    /// The second half is for the languages this interface is translated into. Chinese,
+    /// Japanese and Korean do not put spaces between words, so a whole sentence arrives as one
+    /// "word", and a wrap that only knows about spaces draws it straight off the edge of the
+    /// panel. It is the same rule either way - a thing that does not fit on a line goes on the
+    /// next one - and a single character wider than the line is left where it is rather than
+    /// looped over for ever.
+    fn wrap(&self, text: &str, width: f32, px: f32, weight: Weight) -> Vec<String> {
+        let text = &*omsi_ui::tr(text);
+        let mut out: Vec<String> = Vec::new();
         for para in text.split('\n') {
             let mut line = String::new();
             for word in para.split(' ') {
                 let t = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-                if self.fonts.width(&t, px, weight) > width && !line.is_empty() {
-                    n += 1;
-                    line = word.to_string();
-                } else {
+                if self.fonts.width(&t, px, weight) <= width || line.is_empty() {
                     line = t;
+                } else {
+                    out.push(std::mem::take(&mut line));
+                    line = word.to_string();
+                }
+                while self.fonts.width(&line, px, weight) > width {
+                    let at = self.fit(&line, width, px, weight);
+                    if at == 0 || at >= line.len() {
+                        break;
+                    }
+                    out.push(line[..at].to_string());
+                    line = line[at..].to_string();
                 }
             }
-            n += 1;
+            out.push(line);
         }
-        n as f32 * lh
+        out
+    }
+
+    /// How many bytes of `line` fit in `width`: at least one character, at most all of it. The
+    /// measure is a search and not a walk per character, because this runs on every frame a
+    /// paragraph is drawn on, and only for a word too long for its line.
+    fn fit(&self, line: &str, width: f32, px: f32, weight: Weight) -> usize {
+        let starts: Vec<usize> = line.char_indices().map(|(i, _)| i).collect();
+        let (mut lo, mut hi, mut best) = (1usize, starts.len(), 1usize);
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            let end = starts.get(mid).copied().unwrap_or(line.len());
+            if self.fonts.width(&line[..end], px, weight) <= width {
+                best = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        starts.get(best).copied().unwrap_or(line.len())
     }
 
     pub fn icon(&mut self, name: &str, center: Vec2, size: f32, c: Color) {

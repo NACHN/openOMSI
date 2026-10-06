@@ -3389,6 +3389,19 @@ impl World {
         self.staged.lock().clear();
     }
 
+    /// Let go of the tile layout, and of the tiles staged through it.
+    ///
+    /// The layout (`World::layout`) is built once from the tiles that are *there* - each one's
+    /// file, its neighbours, the tiles whose splines reach it - and every load goes through it:
+    /// a tile with no place in the layout is staged as nothing and drawn as nothing, without a
+    /// word. So a tile the map has gained, or one whose file a save has just written (which the
+    /// layout never saw either), has to be followed by this, or it is a tile that is listed and
+    /// loaded and simply not there. Built again on the next load, from the map as it stands then.
+    pub fn forget_layout(&self) {
+        *self.layout.lock() = None;
+        self.forget_all_staged();
+    }
+
     /// The map index, built on first use (every tile file read once, in parallel).
     /// How many passengers get off at stop object `id` (see `tiles::stop_exit_weight`; a
     /// stop without strings: the defaults' mean, 0.5).

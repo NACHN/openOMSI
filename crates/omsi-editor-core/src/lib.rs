@@ -10,11 +10,15 @@
 //!   editor saves UTF-16LE, hand-made tiles are ASCII or Latin-1);
 //! * [`record`]: an object record inside that text - moved, turned or taken away, with every
 //!   other line, keyword and comment left exactly where it was;
+//! * [`tilemap`]: `global.cfg`'s own text - a tile added to the map's list of them, or taken
+//!   out of it, with the entry points that number tiles by their place kept right;
 //! * [`ground`]: the ground brush, shaping one tile's height field;
 //! * [`document`]: the open map - its tiles, its object index, what has been changed, and how
 //!   it is written back;
 //! * [`newmap`]: a map where there was none - the one place here that writes a first version
 //!   rather than a change to somebody else's;
+//! * [`assets`]: the scenery objects the content folder holds - what a map can be built from,
+//!   as against what is already in it;
 //! * [`command`]: one change and its inverse, so every step can be taken back;
 //! * [`session`]: the map, the history, the selection and the brush together - what a front
 //!   end drives, whether that is a terminal or a window.
@@ -33,6 +37,7 @@
 //! written into the content folder as a copy, which the game reads before the installation
 //! (see [`Document::open`]). A save that would land inside the original is refused.
 
+pub mod assets;
 pub mod codec;
 pub mod command;
 pub mod document;
@@ -40,13 +45,18 @@ pub mod ground;
 pub mod newmap;
 pub mod record;
 pub mod session;
+pub mod tilemap;
 
 pub use codec::Encoding;
 pub use command::{Command, History};
-pub use document::{companion, tile_origin, Destination, Document, NewObject, ObjectRef, SaveReport, TileDoc, TileId};
+pub use document::{
+    companion, tile_file_name, tile_origin, Destination, Document, HeldTile, NewObject, ObjectRef, SaveReport, TileDoc,
+    TileEntry, TileId,
+};
 pub use ground::{GroundAction, GridRect, BRUSH_DEFAULT, BRUSH_MAX, BRUSH_MIN};
+pub use tilemap::{insert_entry, map_entries, remove_entry, MapEntry, Removal};
 pub use newmap::{clean_name, create as create_map, MadeMap};
-pub use record::{add_copies, object_records, record_lines, rewrite_tile, NewRecord, ObjectEdit, ObjectRecord};
+pub use record::{add_copies, blank_object_record, object_records, record_lines, rewrite_tile, NewRecord, ObjectEdit, ObjectRecord};
 pub use session::{clamp_brush, Selection, Session};
 
 /// What the editor refuses to do.

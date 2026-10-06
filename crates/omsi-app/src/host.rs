@@ -44,6 +44,17 @@ pub mod ui {
     pub use omsi_ui::tr;
 }
 
+/// The launcher's showroom, for the editor's asset list: the same picture of a model, drawn by
+/// the same renderer on the same floor under the same light, with the same orbit and zoom.
+///
+/// It is here for the same reason `ui` is - so that the editor shows a `.sco` the way the
+/// launcher shows a bus, rather than growing a second preview of its own. A `Look` with
+/// `object` set (and `bus` empty) stands that scenery object on the floor instead of a vehicle;
+/// `map` may be a path of its own, which is what the editor hands over for the map it has open.
+pub mod showroom {
+    pub use crate::launcher::showroom::{Look, Showroom};
+}
+
 /// Read the interface's language from the settings and put it in force, returning the code.
 ///
 /// The launcher does this before its first page; the editor's panels are read in the same

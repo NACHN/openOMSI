@@ -2,8 +2,19 @@
 //! back.
 //!
 //! A [`Document`] is the whole of an editing session's state and has no idea a window exists.
-//! `omsi-editor` drives it from a camera and panels; `omsi-app`'s in-game editor drives it
-//! from keys. Both get the same behaviour, which is the point of it living here.
+//! `omsi-editor` drives it - from a camera and panels in the window, from typed lines at the
+//! terminal - and both get the same behaviour, which is the point of it living here.
+//!
+//! The game's own object editor is a third front end that is **not** on it, deliberately.
+//! `omsi-app`'s `editor` keeps its own list of what was changed and its own `Added` record in
+//! place of [`NewObject`], and shares this crate's writing end alone - [`rewrite_tile`],
+//! [`add_copies`] and [`ObjectEdit`]. That editor is frozen: the standalone one is where map
+//! editing goes, so no feature is added to the second copy again. Nothing here depends on it,
+//! so the day it is deleted this Document stays as it is. See `docs/EDITOR.md`, stage 0.
+//!
+//! [`rewrite_tile`]: crate::rewrite_tile
+//! [`add_copies`]: crate::add_copies
+//! [`ObjectEdit`]: crate::ObjectEdit
 //!
 //! # What is indexed
 //!
@@ -68,7 +79,7 @@ pub fn tile_origin(tile: TileId) -> DVec3 {
 }
 
 /// An object of the map, as its tile file has it (before any edit).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObjectRef {
     pub tile: TileId,
     /// Where the record puts it.
@@ -179,6 +190,10 @@ pub struct SaveReport {
     pub objects: usize,
     /// How many tiles had their ground written.
     pub grounded: usize,
+    /// How many tiles the map gained, files and ground and all.
+    pub made: usize,
+    /// Whether the map's own `global.cfg` was written - a tile added or taken away.
+    pub listed: bool,
 }
 
 impl SaveReport {
@@ -191,10 +206,16 @@ impl SaveReport {
         if self.is_empty() {
             return "Nothing to save".into();
         }
+        let mut parts = vec![format!("{} object(s)", self.objects), format!("{} tile ground(s)", self.grounded)];
+        if self.made > 0 {
+            parts.push(format!("{} new tile(s)", self.made));
+        }
+        if self.listed {
+            parts.push("the map's tile list".into());
+        }
         format!(
-            "Saved: {} object(s), {} tile ground(s), {} file(s){}",
-            self.objects,
-            self.grounded,
+            "Saved: {} in {} file(s){}",
+            parts.join(", "),
             self.files.len(),
             if self.backups.is_empty() {
                 String::new()
@@ -203,6 +224,46 @@ impl SaveReport {
             }
         )
     }
+}
+
+/// A `[map]` entry as the file has it: the tile's place, and the file it is written in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TileEntry {
+    pub x: i32,
+    pub y: i32,
+    pub file: String,
+}
+
+impl TileEntry {
+    /// The entry for a tile at `x, y`, whose file is named the way OMSI names one.
+    pub fn of(tile: TileId) -> TileEntry {
+        TileEntry { x: tile.0, y: tile.1, file: tile_file_name(tile) }
+    }
+}
+
+/// The file a tile is written in, as every OMSI map names it.
+pub fn tile_file_name(tile: TileId) -> String {
+    format!("tile_{}_{}.map", tile.0, tile.1)
+}
+
+/// What a tile held when it was taken out of the map: its file's text, the objects that file
+/// listed and what this session had done to each, the copies placed in it, and its ground.
+///
+/// Kept so that putting the tile back puts all of it back - a removal is one step to take
+/// back, so undoing one has to leave nothing behind. The file itself is never deleted, so
+/// this is about what a *session* knew, not about what is on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeldTile {
+    /// The tile file's text as it was, and the encoding to write it back in.
+    pub text: String,
+    pub encoding: Encoding,
+    /// The objects its file listed, and what this session had done to each.
+    pub objects: Vec<(i64, ObjectRef, ObjectEdit)>,
+    /// The copies placed in it this session.
+    pub placed: Vec<NewObject>,
+    /// Its ground as it stood, with the hash the last save left - `None` when nothing had
+    /// loaded it, in which case a save reads it from the file as any other tile's.
+    pub terrain: Option<(Terrain, u64)>,
 }
 
 /// A hash of a tile's ground, so "has it changed?" is a comparison and not a flag some later
@@ -228,6 +289,19 @@ pub struct Document {
     install_root: PathBuf,
     destination: Destination,
     global: GlobalCfg,
+    /// The map's own `global.cfg`: its text as it was read, and the encoding to put it back.
+    /// Which tiles the map has *is* this file's `[map]` list, so adding a tile or taking one
+    /// away is an edit to this text - made line by line and written back the way it came in,
+    /// like every other edit here (see [`crate::tilemap`]).
+    global_doc: TileDoc,
+    /// The text a save compares the above against, so that "has the tile list changed?" is a
+    /// comparison and not a flag some later undo would have to remember to clear - the same
+    /// rule the ground's `terrain_hash` follows.
+    global_baseline: String,
+    /// The tiles this session added. Their files are not on disk yet, which nothing else in a
+    /// [`Document`] is: every other change is a change to a file that already exists, so a
+    /// save has to make these rather than rewrite them.
+    new_tiles: HashSet<TileId>,
     tiles: HashMap<TileId, MapTileRef>,
     loaded: HashMap<TileId, TileDoc>,
     objects: HashMap<i64, ObjectRef>,
@@ -249,16 +323,39 @@ impl Document {
     /// Open the map `map_cfg` (`…/maps/<name>/global.cfg`) and index every object it holds.
     pub fn open(map_cfg: impl AsRef<Path>, destination: Destination) -> Result<Self, EditError> {
         let map_cfg = map_cfg.as_ref().to_path_buf();
-        let global = GlobalCfg::load(&map_cfg).map_err(|e| EditError::Cfg { path: map_cfg.clone(), source: e })?;
-        let map_dir = global.dir().to_path_buf();
+        // the map's folder, and the installation it sits in: where a tile's own file is looked
+        // for, and what a copy's place under the content folder is measured from. Both are the
+        // installation's, whatever file the reading below comes from.
+        let map_dir = map_cfg.parent().map(Path::to_path_buf).unwrap_or_else(|| map_cfg.clone());
         let install_root = map_dir.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()).unwrap_or_else(|| map_dir.clone());
+        // The map's own file, and which of it is read. Under `Destination::Content` a copy an
+        // earlier save wrote is the one the game reads, so it is the one to read here too - the
+        // same rule [`Document::tile_source`] follows for a tile, and what makes a tile added in
+        // an earlier session still be there when the map is opened again.
+        let source = match &destination {
+            Destination::InPlace => map_cfg.clone(),
+            Destination::Content(root) => {
+                let copy = content_copy(&install_root, root, &map_cfg);
+                if copy.exists() {
+                    copy
+                } else {
+                    map_cfg.clone()
+                }
+            }
+        };
+        let global = GlobalCfg::load(&source).map_err(|e| EditError::Cfg { path: source.clone(), source: e })?;
         let tiles: HashMap<TileId, MapTileRef> = global.tiles.iter().map(|t| ((t.x, t.y), t.clone())).collect();
+        let raw = omsi_cfg::vfs::read(&source).map_err(|e| EditError::io(&source, e))?;
+        let (global_text, global_encoding) = decode(&raw);
         let mut doc = Document {
             map_cfg,
             map_dir,
             install_root,
             destination,
             global,
+            global_doc: TileDoc { source, text: global_text.clone(), encoding: global_encoding },
+            global_baseline: global_text,
+            new_tiles: HashSet::new(),
             tiles,
             loaded: HashMap::new(),
             objects: HashMap::new(),
@@ -283,8 +380,11 @@ impl Document {
     /// warning: one broken file must not stop a map from opening.
     fn index(&mut self) -> Result<(), EditError> {
         let mut objects: HashMap<i64, ObjectRef> = HashMap::new();
-        for (id, tile) in self.tiles.iter().map(|(k, v)| (*k, v.clone())).collect::<Vec<_>>() {
-            let src = omsi_cfg::resolve_path(&self.map_dir, &tile.file);
+        for id in self.tiles.keys().copied().collect::<Vec<_>>() {
+            // the file a save would write this tile in, and not a lookup by name: a tile an
+            // earlier session added is in the content folder and in no installation at all, and
+            // a tile that has been saved once is the copy there (see [`Document::tile_source`])
+            let Some(src) = self.tile_source(id) else { continue };
             let bytes = match omsi_cfg::vfs::read(&src) {
                 Ok(b) => b,
                 Err(e) => {
@@ -323,6 +423,18 @@ impl Document {
 
     pub fn map_dir(&self) -> &Path {
         &self.map_dir
+    }
+
+    /// The folder a record's own path is written against: the one holding `maps/`,
+    /// `Sceneryobjects` and `Splines` - the installation, or the content folder the map was
+    /// found under.
+    ///
+    /// A tile file names its objects as `Sceneryobjects\Berlin\House1.sco` and nothing else, so
+    /// this is what turns that into a file on this machine
+    /// ([`omsi_cfg::resolve_path`]) - and what [`crate::assets`] walks to list what may be
+    /// placed.
+    pub fn install_root(&self) -> &Path {
+        &self.install_root
     }
 
     pub fn destination(&self) -> &Destination {
@@ -411,8 +523,11 @@ impl Document {
 
     /// Whether anything has been changed since the last save. Computed, never remembered: an
     /// undo that puts everything back reports clean, as it should.
+    ///
+    /// Two questions and not one, because taking a tile out of the map changes no tile at all:
+    /// whether any tile would be written, and whether the map's own list of them has changed.
     pub fn is_dirty(&self) -> bool {
-        !self.dirty_tiles().is_empty()
+        self.is_listed_dirty() || !self.dirty_tiles().is_empty()
     }
 
     /// The tiles a save would write.
@@ -434,6 +549,9 @@ impl Document {
         for a in self.added.values() {
             out.push(a.tile);
         }
+        // a tile this session added has no file to rewrite, so a save has to make it - which
+        // is why it is here even when nothing about it changed
+        out.extend(self.new_tiles.iter().copied());
         out.sort_unstable();
         out.dedup();
         out
@@ -470,8 +588,7 @@ impl Document {
     }
 
     fn content_path(&self, root: &Path, src: &Path) -> PathBuf {
-        let rel = src.strip_prefix(&self.install_root).unwrap_or_else(|_| src.file_name().map(Path::new).unwrap_or(Path::new("")));
-        root.join(rel)
+        content_copy(&self.install_root, root, src)
     }
 
     /// Read a tile's text as it was opened (for a *View source* panel).
@@ -487,6 +604,203 @@ impl Document {
         let tile = self.objects.get(&id)?.tile;
         let doc = self.loaded.get(&tile)?;
         crate::record::record_lines(&doc.text, id)
+    }
+
+    // ---- the map's own list of tiles --------------------------------------------------
+
+    /// The map's `global.cfg` as it stands, text and all.
+    pub fn global_text(&self) -> &str {
+        &self.global_doc.text
+    }
+
+    /// The map's own file as it now stands, parsed - the map list, the numbering an entry
+    /// point counts, and the entry points themselves.
+    ///
+    /// A world keeps its own parse of that file, taken when the map was opened, and streams
+    /// the tiles that parse names: a tile this session added was invisible to it, and one it
+    /// took out went on being drawn, until the map was opened again. This is the same parse
+    /// made again from the text a save would write, which is what a front end hands over
+    /// (`View::adopt_tiles`).
+    pub fn global_now(&self) -> GlobalCfg {
+        GlobalCfg::parse(&omsi_cfg::CfgFile::from_str(&self.global_doc.source, &self.global_doc.text))
+    }
+
+    /// Whether the map's list of tiles has changed since the last save.
+    ///
+    /// Its own question and not a tile's: taking a tile *out* of a map changes no tile's
+    /// contents at all, so "is anything unsaved?" is this **or** whether any tile would be
+    /// written - see [`Document::is_dirty`].
+    pub fn is_listed_dirty(&self) -> bool {
+        self.global_doc.text != self.global_baseline
+    }
+
+    /// The tiles this session added, whose files are not on disk yet.
+    pub fn new_tiles(&self) -> impl Iterator<Item = TileId> + '_ {
+        self.new_tiles.iter().copied()
+    }
+
+    /// Where `tile` sits in the map's `[map]` list - the number an entry point and a track
+    /// file name a tile by. `None` when the map does not list it.
+    pub fn tile_index(&self, tile: TileId) -> Option<usize> {
+        let entry = TileEntry::of(tile);
+        crate::tilemap::map_entries(&self.global_doc.text)
+            .iter()
+            .position(|e| e.x == entry.x && e.y == entry.y && e.file.eq_ignore_ascii_case(&entry.file))
+    }
+
+    /// Whether the map has a timetable - any track file at all.
+    ///
+    /// It decides whether a tile can be taken out of the middle of the list. A track file
+    /// names its tile by that tile's place in the list, and this project does not write
+    /// `.ttr`, so a removal that renumbers anything is refused on a map that has one rather
+    /// than left to point a route at the wrong tile without saying so.
+    pub fn has_tracks(&self) -> bool {
+        std::fs::read_dir(omsi_cfg::resolve_path(&self.map_dir, "TTData"))
+            .map(|entries| entries.flatten().any(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("ttr"))))
+            .unwrap_or(false)
+    }
+
+    /// Add the tile at `tile` to the map: a `[map]` entry for it, and an empty file and a flat
+    /// ground for a save to write.
+    ///
+    /// The entry goes at the end of the list, so every number that names a tile goes on naming
+    /// the same one. That is the whole reason adding is safe where taking away is not; see
+    /// [`crate::tilemap`].
+    pub fn add_tile(&mut self, tile: TileId) -> Result<(), EditError> {
+        if self.tiles.contains_key(&tile) {
+            return Err(EditError::Other(format!("tile ({}, {}) is already in this map", tile.0, tile.1)));
+        }
+        let entry = TileEntry::of(tile);
+        if self.tiles.values().any(|t| t.file.eq_ignore_ascii_case(&entry.file)) {
+            return Err(EditError::Other(format!("{} is already a tile of this map", entry.file)));
+        }
+        // The encoding the map's own tiles are in: a map written in Latin-1 should not gain one
+        // tile of another kind. The first tile of the map's *list* decides - the list is an
+        // order the map itself fixes, where the tiles' own map is a hash and would give a
+        // different answer every run, so the same map could gain a UTF-8 tile one day and a
+        // UTF-16 one the next.
+        let encoding = {
+            let mut listed: Vec<(usize, TileId)> = self.tiles.iter().map(|(id, t)| (t.index, *id)).collect();
+            listed.sort_unstable();
+            listed
+                .iter()
+                .find_map(|(_, id)| self.loaded.get(id))
+                .map(|d| d.encoding)
+                .unwrap_or(Encoding::Utf16Le)
+        };
+        let index = crate::tilemap::map_entries(&self.global_doc.text).len();
+        self.global_doc.text = crate::tilemap::add_entry(&self.global_doc.text, entry.x, entry.y, &entry.file);
+        let source = omsi_cfg::resolve_path(&self.map_dir, &entry.file);
+        self.loaded.insert(tile, TileDoc { source, text: crate::newmap::EMPTY_TILE.to_string(), encoding });
+        self.tiles.insert(tile, MapTileRef { x: tile.0, y: tile.1, file: entry.file, index });
+        // flat ground, and the hash of it, so that shaping it later is what makes it dirty -
+        // the file being missing is [`Document::new_tiles`]'s business, not the ground's
+        let flat = Terrain::flat();
+        self.terrain_hash.insert(tile, terrain_hash(&flat));
+        self.terrain.insert(tile, flat);
+        self.new_tiles.insert(tile);
+        Ok(())
+    }
+
+    /// Take `tile` out of the map: its `[map]` entry, and everything it listed with it.
+    ///
+    /// What is refused, and why: [`crate::tilemap::can_remove`] for the list itself, and - for
+    /// a removal that renumbers tiles - [`Document::has_tracks`], because a track file names a
+    /// tile by number and this project does not write them.
+    ///
+    /// The tile's file is **not** deleted. It is no longer listed, and putting the tile back
+    /// restores it exactly; a file somebody may have made by hand is not an edit to undo, and
+    /// deleting one is not something a click should be able to do.
+    pub fn remove_tile(&mut self, tile: TileId) -> Result<HeldTile, EditError> {
+        let index = self.tile_index(tile).ok_or(EditError::NoTile(tile.0, tile.1))?;
+        match crate::tilemap::can_remove(&self.global_doc.text, index) {
+            crate::tilemap::Removal::NoSuchEntry => return Err(EditError::NoTile(tile.0, tile.1)),
+            crate::tilemap::Removal::EntryPointStands => {
+                return Err(EditError::Other("an entry point stands in that tile, so it cannot go".into()));
+            }
+            crate::tilemap::Removal::Renumbers if self.has_tracks() => {
+                return Err(EditError::Other(
+                    "this map has track files, which name tiles by their place in the list - take the tiles after it away first".into(),
+                ));
+            }
+            _ => {}
+        }
+        let held = self.take_tile_contents(tile);
+        self.global_doc.text = crate::tilemap::remove_entry(&self.global_doc.text, index);
+        self.tiles.remove(&tile);
+        self.new_tiles.remove(&tile);
+        Ok(held)
+    }
+
+    /// Put a tile back where it was, with everything it held - the other half of
+    /// [`Document::remove_tile`], and what its undo is.
+    pub fn restore_tile(&mut self, tile: TileId, at: usize, held: HeldTile) -> Result<(), EditError> {
+        if self.tiles.contains_key(&tile) {
+            return Err(EditError::Other(format!("tile ({}, {}) is already in this map", tile.0, tile.1)));
+        }
+        let entry = TileEntry::of(tile);
+        self.global_doc.text = crate::tilemap::insert_entry(&self.global_doc.text, at, entry.x, entry.y, &entry.file);
+        let source = omsi_cfg::resolve_path(&self.map_dir, &entry.file);
+        self.loaded.insert(tile, TileDoc { source, text: held.text, encoding: held.encoding });
+        let index = self.tile_index(tile).unwrap_or(at);
+        self.tiles.insert(tile, MapTileRef { x: tile.0, y: tile.1, file: entry.file, index });
+        for (id, object, edit) in held.objects {
+            self.objects.insert(id, object);
+            if !edit.is_untouched() {
+                self.edits.insert(id, edit);
+            }
+        }
+        for copy in held.placed {
+            self.added.insert(copy.id, copy);
+        }
+        if let Some((terrain, hash)) = held.terrain {
+            self.terrain.insert(tile, terrain);
+            self.terrain_hash.insert(tile, hash);
+        }
+        Ok(())
+    }
+
+    /// Everything `tile` holds, as a value: its file's text, the objects that file listed with
+    /// what this session had done to each, the copies placed in it, and its ground.
+    ///
+    /// This is what a command captures before it adds a tile, so that taking the tile away
+    /// again puts back exactly what was there.
+    pub fn tile_contents(&self, tile: TileId) -> HeldTile {
+        let (text, encoding) = self
+            .loaded
+            .get(&tile)
+            .map(|d| (d.text.clone(), d.encoding))
+            .unwrap_or((String::new(), Encoding::Utf16Le));
+        let objects = self
+            .objects
+            .iter()
+            .filter(|(_, o)| o.tile == tile)
+            .map(|(id, o)| (*id, o.clone(), self.edit(*id)))
+            .collect();
+        let placed = self.added.values().filter(|a| a.tile == tile).cloned().collect();
+        HeldTile {
+            text,
+            encoding,
+            objects,
+            placed,
+            terrain: self.terrain.get(&tile).map(|t| (t.clone(), self.terrain_hash.get(&tile).copied().unwrap_or(0))),
+        }
+    }
+
+    /// Everything `tile` holds, taken out of the index - see [`Document::tile_contents`].
+    fn take_tile_contents(&mut self, tile: TileId) -> HeldTile {
+        let held = self.tile_contents(tile);
+        self.loaded.remove(&tile);
+        for (id, _, _) in &held.objects {
+            self.objects.remove(id);
+            self.edits.remove(id);
+        }
+        for copy in &held.placed {
+            self.added.remove(&copy.id);
+        }
+        self.terrain.remove(&tile);
+        self.terrain_hash.remove(&tile);
+        held
     }
 
     /// The height of the ground at a world position, from the edited ground when there is one.
@@ -622,6 +936,15 @@ impl Document {
     /// the map as it now is on disk.
     pub fn save(&mut self) -> Result<SaveReport, EditError> {
         let mut report = SaveReport::default();
+        // the map's own file, when a tile was added or taken away. It goes to the same place a
+        // tile does, so a content-folder save writes the copy the game reads first.
+        if self.is_listed_dirty() {
+            let (source, text, encoding) = (self.global_doc.source.clone(), self.global_doc.text.clone(), self.global_doc.encoding);
+            let out = self.target_of(&source);
+            self.write(&out, &encode(&text, encoding), &mut report)?;
+            self.global_baseline = text;
+            report.listed = true;
+        }
         for tile in self.dirty_tiles() {
             self.save_tile(tile, &mut report)?;
         }
@@ -694,8 +1017,11 @@ impl Document {
             .collect();
         let objects_dirty = !edits.is_empty() || !copies.is_empty();
         let ground_dirty = self.ground_is_dirty(tile);
+        // a tile the map has just gained: its file is not there to be rewritten, so a save
+        // makes it - with whatever it holds, even when that is nothing
+        let fresh = self.new_tiles.contains(&tile);
 
-        if !objects_dirty && !ground_dirty {
+        if !fresh && !objects_dirty && !ground_dirty {
             return Ok(());
         }
 
@@ -704,7 +1030,14 @@ impl Document {
         let doc = self.loaded.get(&tile).ok_or(EditError::NoTile(tile.0, tile.1))?;
         let (source, text, encoding) = (doc.source.clone(), doc.text.clone(), doc.encoding);
 
-        if objects_dirty {
+        if fresh {
+            let (text, added) = add_copies(&text, &copies);
+            let out = self.target_of(&source);
+            self.write(&out, &encode(&text, encoding), report)?;
+            report.objects += added;
+            report.made += 1;
+            self.rebaseline(tile, text);
+        } else if objects_dirty {
             let (text, changed) = rewrite_tile(&text, &edits);
             let (text, added) = add_copies(&text, &copies);
             if changed + added == 0 && !edits.is_empty() {
@@ -725,7 +1058,8 @@ impl Document {
             }
         }
 
-        if ground_dirty {
+        // a new tile's ground goes with it, flat: the file does not exist to be left alone
+        if ground_dirty || fresh {
             let (bytes, hash) = {
                 let t = self.terrain.get(&tile).ok_or(EditError::NoTile(tile.0, tile.1))?;
                 (t.to_bytes(), terrain_hash(t))
@@ -735,6 +1069,9 @@ impl Document {
             // the ground on disk is this now, so the session goes clean for this tile
             self.terrain_hash.insert(tile, hash);
             report.grounded += 1;
+        }
+        if fresh {
+            self.new_tiles.remove(&tile);
         }
         Ok(())
     }
@@ -766,4 +1103,19 @@ pub fn companion(src: &Path) -> PathBuf {
         Some(name) => src.with_file_name(format!("{}.terrain", name.to_string_lossy())),
         None => src.with_extension("terrain"),
     }
+}
+
+/// Where a file read from `src` is written under `Destination::Content`: a copy that keeps the
+/// map's place in the installation's layout, because that place is what the game looks a map
+/// up by.
+///
+/// A file that is *already* under `root` is that copy - it is handed back as it is. Otherwise a
+/// second save of a map whose own file is the copy (the launcher opens a map through the
+/// content folder first) would write the tile beside the map folder instead of inside it.
+fn content_copy(install_root: &Path, root: &Path, src: &Path) -> PathBuf {
+    if src.starts_with(root) {
+        return src.to_path_buf();
+    }
+    let rel = src.strip_prefix(install_root).unwrap_or_else(|_| src.file_name().map(Path::new).unwrap_or(Path::new("")));
+    root.join(rel)
 }

@@ -88,6 +88,10 @@ pub struct View {
     /// the camera has moved into another tile.
     loaded: HashSet<(i32, i32)>,
     asked_for: Option<(i32, i32)>,
+    /// The tiles that were *there* - listed and read from a file - the last time the world's
+    /// layout was believed. A tile that has appeared in that list since, or one that has
+    /// become readable, leaves the layout behind (`View::adopt_tiles`).
+    tiles_there: Option<Vec<(i32, i32)>>,
     day_of_year: i32,
     pub speed: f64,
     /// The last thing that happened, for the window's title.
@@ -308,6 +312,7 @@ impl View {
             camera: host::camera_over(start, 60.0),
             loaded: HashSet::new(),
             asked_for: None,
+            tiles_there: None,
             day_of_year: clock.day_of_year,
             speed: SPEED,
             note: String::new(),
@@ -431,6 +436,51 @@ impl View {
         self.asked_for = None;
     }
 
+    /// Take the map's own list of tiles from the session: the tiles a world streams, the
+    /// numbering an entry point counts to, and the entry points.
+    ///
+    /// A [`World`] holds that list as it was when the map was opened, and streams what it
+    /// names - so a tile added to the list was not drawn, and one taken off it went on being
+    /// drawn, until the map was opened again. This is what puts the two back in step.
+    ///
+    /// Nothing is built or unloaded here. The streaming that is already there does that, and
+    /// does it right, because a tile that went is outside what is wanted and one that came is
+    /// inside it (see [`View::stream`]). The one thing that has to be said is that the area
+    /// worth having is worth working out again: `stream` does nothing while the camera stands
+    /// in the tile it was last in, and the camera has not moved.
+    ///
+    /// A tile added this session has no file until a save writes one, and a tile that is not
+    /// on disk cannot be built: a tile added and not yet written is in the list and not on the
+    /// ground, which is the state the tile grid draws in the meantime.
+    pub fn adopt_tiles(&mut self, session: &Session) {
+        let now = session.doc().global_now();
+        let relisted = now.tiles != self.world.global.tiles;
+        // the three fields that name tiles: what each is called, what number a tile index
+        // counts to, and which tile each entry point stands in
+        self.world.global.tiles = now.tiles;
+        self.world.global.raw_tiles = now.raw_tiles;
+        self.world.global.entry_points = now.entry_points;
+        // The world also holds a layout built from the tiles that were *there* when it was
+        // first asked for one - each tile's file, its neighbours, what its ground is cut with -
+        // and a load goes through that layout and no other: a tile with no place in it is
+        // staged as nothing and drawn as nothing. A tile added to the list has no place in it,
+        // and neither has a tile whose file a save has just written, because until then it was
+        // a tile that could not be built at all. So the layout goes when either of those has
+        // happened - which is asked of the files themselves rather than remembered, since what
+        // makes a tile a tile is that its file is there.
+        let there: Vec<TileId> = self.world.select_tiles(None, None).into_iter().map(|(x, y, _)| (x, y)).collect();
+        // (the first look is not a change: the layout was built by the load that opened the
+        // map, from this very list)
+        let stale = relisted || self.tiles_there.as_ref().is_some_and(|then| *then != there);
+        self.tiles_there = Some(there);
+        if stale {
+            self.world.forget_layout();
+        }
+        // the tile the camera asked for last is about to be the wrong answer, and asking it is
+        // the whole of what `stream` checks before deciding there is nothing to do
+        self.asked_for = None;
+    }
+
     // ---- the camera -------------------------------------------------------------------
 
     /// Fly: `forward` along the view, `right` across it to the right hand, `up` world-wards
@@ -519,6 +569,24 @@ impl View {
         // behind the camera is not a place anyone pointed at either
         (t > 0.01).then(|| eye + dir * t)
     }
+
+    /// Where the ray through `ndc` meets the level the map's tiles are drawn on: the height of
+    /// the ground under the camera, or sea level when it is standing over none.
+    ///
+    /// [`View::aim`] and this are two different questions, and a map's edge is where they part.
+    /// `aim` answers "where would a click land", which is ground - and outside the tiles a map
+    /// has there is none, so over the ring of tiles it *could* have, `aim` answers nothing at
+    /// all. That ring is exactly where the tile tool is used (see `crate::tiles`), so that tool
+    /// asks for a level instead, and a level is there whether the map is or not. The camera's
+    /// own ground height is what makes the level the one the near tiles are drawn on, rather
+    /// than sea level under a map that sits on a hill.
+    pub fn aim_on_the_tiles(&self, ndc: (f32, f32), aspect: f32) -> Option<DVec3> {
+        let z = self
+            .world
+            .ground_terrain(self.camera.position.x, self.camera.position.y)
+            .unwrap_or(0.0);
+        self.plane(ndc, aspect, z)
+    }
 }
 
 #[cfg(test)]
@@ -574,5 +642,111 @@ mod tests {
         let mut downwards = level(0.0);
         turn(&mut downwards, 0.0, 10.0);
         assert!(downwards.pitch < 0.0, "the pointer going down looks down, got pitch {}", downwards.pitch);
+    }
+
+    // ---- the map's own list of tiles, as the world is told it -----------------------------
+    //
+    // A world streams the tile list of the file the map was opened on, so a tile this session
+    // added was invisible and one it took out went on being drawn until the map was opened
+    // again. What is checked here is the part that cannot be seen in a picture: the list the
+    // world ends up holding, and the numbering an entry point counts with.
+
+    /// A map of two tiles with an entry point standing in the second, so that taking the first
+    /// out renumbers it - the thing a world's list has to follow, and the reason a removal is
+    /// not just a shorter list. (An entry point record is its index, object, unknown, x, z, y,
+    /// four quaternions, the tile it stands in, and its name.)
+    const TWO_TILES: &str = "[entrypoints]\r\n1\r\n0\r\n0\r\n0\r\n150\r\n0\r\n150\r\n0\r\n0\r\n0\r\n1\r\n1\r\nStart\r\n\r\n[map]\r\n0\r\n0\r\ntile_0_0.map\r\n\r\n[map]\r\n1\r\n0\r\ntile_1_0.map\r\n";
+
+    /// That map on disk. Nothing here draws a tile, so a tile's own file need only exist: the
+    /// world offers the tiles whose files are there (`World::select_tiles`).
+    fn a_map_on_disk(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("openomsi-view-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let map = root.join("maps").join("Tiny");
+        std::fs::create_dir_all(&map).unwrap();
+        std::fs::write(map.join("global.cfg"), TWO_TILES).unwrap();
+        for t in ["tile_0_0.map", "tile_1_0.map"] {
+            std::fs::write(map.join(t), "[version]\r\n11\r\n").unwrap();
+        }
+        root
+    }
+
+    /// A view over a world, with no renderer and no frame: what is under test is the list a
+    /// world holds, and nothing is drawn in these tests.
+    fn a_view_over(world: World) -> View {
+        View {
+            world,
+            camera: host::camera_over(DVec3::ZERO, 60.0),
+            loaded: HashSet::new(),
+            asked_for: None,
+            tiles_there: None,
+            day_of_year: 1,
+            speed: SPEED,
+            note: String::new(),
+        }
+    }
+
+    /// The tiles a world would stream, in the order it lists them.
+    fn listed(world: &World) -> Vec<(i32, i32)> {
+        world.global.tiles.iter().map(|t| (t.x, t.y)).collect()
+    }
+
+    #[test]
+    fn the_worlds_list_of_tiles_follows_the_map_rather_than_the_file_it_was_opened_on() {
+        let root = a_map_on_disk("adopt");
+        let map_cfg = root.join("maps").join("Tiny").join("global.cfg");
+        let mut session = Session::open(&map_cfg, omsi_editor_core::Destination::Content(root.join("content"))).unwrap();
+        let mut view = a_view_over(host::open(&root, &map_cfg).unwrap());
+
+        // the map it was opened on: two tiles, and an entry point named for the second
+        assert_eq!(listed(view.world()), vec![(0, 0), (1, 0)]);
+        assert_eq!(view.world().global.entry_points[0].group, 1);
+
+        // a tile added goes on the end, and there is nothing after it to renumber
+        session.add_tile((2, 0)).unwrap();
+        view.adopt_tiles(&session);
+        assert_eq!(listed(view.world()), vec![(0, 0), (1, 0), (2, 0)]);
+        assert_eq!(view.world().global.entry_points[0].group, 1);
+
+        // the first one out: the tiles after it move up the list, so the entry point that
+        // counted to 1 counts to 0 - the same tile it named before, by its new number. A world
+        // that was only told the shorter list would have it standing in tile (0, 0), which is
+        // not in the map at all
+        session.remove_tile((0, 0)).unwrap();
+        view.adopt_tiles(&session);
+        assert_eq!(listed(view.world()), vec![(1, 0), (2, 0)]);
+        assert_eq!(view.world().global.raw_tiles, vec![(1, 0), (2, 0)]);
+        assert_eq!(view.world().global.entry_points[0].group, 0);
+
+        // one step back, and the view is back with the map
+        session.undo().unwrap();
+        view.adopt_tiles(&session);
+        assert_eq!(listed(view.world()), vec![(0, 0), (1, 0), (2, 0)]);
+        assert_eq!(view.world().global.entry_points[0].group, 1);
+    }
+
+    #[test]
+    fn a_tile_added_is_in_the_list_and_a_tile_written_is_one_the_world_offers() {
+        // The difference a save makes, which is why a tile appears on the ground a moment
+        // after it appears in the list: a world streams tiles, and a tile with no file is not
+        // a tile it can stream. (The map's own files, so that this is a test about the list
+        // and the file rather than about which content roots a process happens to have.)
+        let root = a_map_on_disk("written");
+        let map_cfg = root.join("maps").join("Tiny").join("global.cfg");
+        let mut session = Session::open(&map_cfg, omsi_editor_core::Destination::InPlace).unwrap();
+        let mut view = a_view_over(host::open(&root, &map_cfg).unwrap());
+        let offered = |view: &View| -> Vec<(i32, i32)> {
+            view.world().select_tiles(Some((0, 0)), Some(4)).into_iter().map(|(x, y, _)| (x, y)).collect()
+        };
+
+        session.add_tile((2, 0)).unwrap();
+        view.adopt_tiles(&session);
+        assert_eq!(listed(view.world()), vec![(0, 0), (1, 0), (2, 0)], "the tile is not in the list");
+        assert!(!offered(&view).contains(&(2, 0)), "a tile with no file was offered");
+
+        session.save().unwrap();
+        view.adopt_tiles(&session);
+        assert!(offered(&view).contains(&(2, 0)), "the tile that was written is not offered: {:?}", offered(&view));
+        assert!(root.join("maps").join("Tiny").join("tile_2_0.map").is_file());
     }
 }

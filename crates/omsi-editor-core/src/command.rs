@@ -9,7 +9,7 @@
 //! a keystroke was applied straight to the world. Here the keystroke is a value first, which
 //! is what lets the same change be taken back, redone, or logged.
 
-use crate::document::{Document, NewObject, TileId};
+use crate::document::{Document, HeldTile, NewObject, TileId};
 use crate::ground::{GroundAction, GridRect};
 use crate::record::ObjectEdit;
 use crate::EditError;
@@ -36,6 +36,18 @@ pub enum Command {
     ShapeGround { at: DVec3, radius: f64, action: GroundAction },
     /// Put these ground samples back as they were.
     RestoreTerrain { tile: TileId, rect: GridRect, before: Vec<f32> },
+    /// Add a tile to the map's list of them, with its own empty file and its own flat ground.
+    ///
+    /// Appended to the list, so nothing that names a tile changes its number: adding a tile is
+    /// safe where taking one away is not (see [`crate::tilemap`]).
+    AddTile { tile: TileId },
+    /// Take a tile out of the map's list, and everything that was in it with it. The tile's
+    /// own file is left on disk - unlisted, not deleted.
+    RemoveTile { tile: TileId },
+    /// Put a tile back where it was, with everything it held. This is the inverse of a
+    /// removal, and the only command that carries a [`HeldTile`] - an addition's inverse
+    /// captures what the new tile holds when it is taken away again.
+    RestoreTile { tile: TileId, at: usize, held: HeldTile },
     /// Several changes that were one gesture, undone together.
     Batch(Vec<Command>),
 }
@@ -53,6 +65,9 @@ impl Command {
             Command::SetVariant { id, sco } => format!("Object {id} becomes {}", short(Path::new(sco))),
             Command::ShapeGround { action, radius, .. } => format!("{} (brush {} m)", action.describe(), crate::codec::num(*radius)),
             Command::RestoreTerrain { tile, .. } => format!("Restore the ground of tile ({}, {})", tile.0, tile.1),
+            Command::AddTile { tile } => format!("Add the tile ({}, {})", tile.0, tile.1),
+            Command::RemoveTile { tile } => format!("Take the tile ({}, {}) out of the map", tile.0, tile.1),
+            Command::RestoreTile { tile, .. } => format!("Put the tile ({}, {}) back", tile.0, tile.1),
             Command::Batch(v) => match v.as_slice() {
                 [one] => one.label(),
                 [] => "Nothing".into(),
@@ -104,6 +119,20 @@ impl Command {
                 let now = doc.capture_ground(*tile, rect)?;
                 doc.restore_ground(*tile, rect, before)?;
                 Ok(Command::RestoreTerrain { tile: *tile, rect: *rect, before: now })
+            }
+            // a new tile holds nothing, so taking it away again is the whole inverse
+            Command::AddTile { tile } => {
+                doc.add_tile(*tile)?;
+                Ok(Command::RemoveTile { tile: *tile })
+            }
+            Command::RemoveTile { tile } => {
+                let at = doc.tile_index(*tile).ok_or(EditError::NoTile(tile.0, tile.1))?;
+                let held = doc.remove_tile(*tile)?;
+                Ok(Command::RestoreTile { tile: *tile, at, held })
+            }
+            Command::RestoreTile { tile, at, held } => {
+                doc.restore_tile(*tile, *at, held.clone())?;
+                Ok(Command::RemoveTile { tile: *tile })
             }
             Command::Batch(cmds) => {
                 let mut inverses = Vec::with_capacity(cmds.len());

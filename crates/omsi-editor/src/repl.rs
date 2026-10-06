@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Result};
 use glam::DVec3;
-use omsi_editor_core::{Destination, Session};
+use omsi_editor_core::{tile_file_name, Destination, Session};
 
 /// Whether the session should carry on reading lines.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,6 +42,10 @@ pub const HELP: &str = "\
   where                    where the selection stands
   variants                 the .sco files sitting beside the selection
 
+  tiles                    the map's tiles, in the order its own list has them
+  tile add <x> <y>         make the tile there, and add it to the map
+  tile rm <x> <y>          take that tile out of the map (its file is left alone)
+
   mv <dx> <dy> <dz>        move the selection (m)
   move <x> <y> <z>         move the selection to a place (m)
   turn <deg>               turn the selection
@@ -49,6 +53,9 @@ pub const HELP: &str = "\
   del | undel              take the selection out of the map / put it back
   reset                    put everything done to the selection back
   place [name.sco] [x y z] a copy of the selection, there or two metres to its right
+  assets [text]            the .sco files the content folder holds, matching a text
+  new <sco> <x> <y> [h]    a brand-new object out of that folder, there, facing h degrees
+  arm <sco> | arm off      hold a .sco in the place tool: a click then puts one down
 
   brush <r> | brush x1.25  the ground brush's radius (m, 1 to 60)
   raise <m> [x y]          raise the ground under the selection, or at x y
@@ -87,6 +94,26 @@ pub fn run_line(session: &mut Session, line: &str) -> Result<Outcome> {
         }
 
         "where" => Ok(Outcome::said(session.selection_summary())),
+
+        "tiles" | "tl" => Ok(Outcome::said(tiles(session))),
+
+        "tile" => {
+            let what = rest.first().copied().unwrap_or("").to_ascii_lowercase();
+            let usage = "tile add <x> <y> | tile rm <x> <y> | tiles";
+            match what.as_str() {
+                "add" | "+" | "new" => {
+                    let tile = need_tile(&rest, usage)?;
+                    session.add_tile(tile)?;
+                    Ok(Outcome::said(one_tile(session, tile, "added")))
+                }
+                "rm" | "remove" | "del" | "-" => {
+                    let tile = need_tile(&rest, usage)?;
+                    session.remove_tile(tile)?;
+                    Ok(Outcome::said(format!("Tile ({}, {}) is out of the map. Its own file is still on disk.", tile.0, tile.1)))
+                }
+                _ => bail!("{usage}"),
+            }
+        }
 
         "variants" => {
             let v = session.sibling_variants();
@@ -134,6 +161,38 @@ pub fn run_line(session: &mut Session, line: &str) -> Result<Outcome> {
                 };
                 Ok(s.place_copy(template, name, at, 0.0)?)
             })
+        }
+
+        // the one command that is not about what is in the map: `.sco` files the content
+        // folder holds, which no map needs to have heard of yet
+        "assets" | "asset" => Ok(Outcome::said(assets(session, &rest.join(" ")))),
+
+        "new" => {
+            let usage = "new <sco> <x> <y> [heading]";
+            let sco = rest.first().copied().ok_or_else(|| anyhow::anyhow!("{usage}"))?.to_string();
+            let x = need_f64(&rest, 1, usage)?;
+            let y = need_f64(&rest, 2, usage)?;
+            let heading = match rest.get(3) {
+                Some(w) => w.parse::<f64>().map_err(|_| anyhow::anyhow!("{usage}"))?,
+                None => 0.0,
+            };
+            match session.place_asset(&sco, DVec3::new(x, y, 0.0), heading)? {
+                Some(l) => Ok(Outcome::said(l)),
+                None => Ok(Outcome::said("No change")),
+            }
+        }
+
+        "arm" => {
+            let what = rest.first().copied().unwrap_or("");
+            if what.is_empty() || ["off", "none", "clear", "-"].contains(&what.to_ascii_lowercase().as_str()) {
+                session.arm_asset(None);
+                return Ok(Outcome::said("The place tool holds nothing: a click copies the selection."));
+            }
+            if !what.to_ascii_lowercase().ends_with(".sco") {
+                bail!("arm <sco> | arm off");
+            }
+            session.arm_asset(Some(what.to_string()));
+            Ok(Outcome::said(format!("The place tool holds {what} - a click puts one down.")))
         }
 
         "brush" => {
@@ -312,6 +371,79 @@ fn need_i64(rest: &[&str], i: usize, usage: &str) -> Result<i64> {
     }
 }
 
+/// The tile two numbers name, after the word that says what to do with it.
+fn need_tile(rest: &[&str], usage: &str) -> Result<(i32, i32)> {
+    Ok((need_i64(rest, 1, usage)? as i32, need_i64(rest, 2, usage)? as i32))
+}
+
+/// The `.sco` files the content folder holds, matching `filter` - what `new` can name, and
+/// what the assets page lists.
+///
+/// Long lists are cut: an installation's `Sceneryobjects` holds thousands of files, and a
+/// thousand lines in the console is not a list anybody reads.
+fn assets(session: &Session, filter: &str) -> String {
+    let root = session.doc().install_root();
+    let all = omsi_editor_core::assets::scenery_objects(root);
+    if all.is_empty() {
+        return format!("No Sceneryobjects folder under {}", root.display());
+    }
+    let needle = filter.trim().to_ascii_lowercase();
+    let shown: Vec<&String> = all
+        .iter()
+        .filter(|s| needle.is_empty() || s.to_ascii_lowercase().contains(&needle))
+        .collect();
+    if shown.is_empty() {
+        return format!("None of the {} .sco files here matches that", all.len());
+    }
+    let mut out = shown
+        .iter()
+        .take(ASSETS_SHOWN)
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if shown.len() > ASSETS_SHOWN {
+        out.push_str(&format!("\n... and {} more", shown.len() - ASSETS_SHOWN));
+    } else {
+        out.push_str(&format!("\n({} of {})", shown.len(), all.len()));
+    }
+    out
+}
+
+/// How many of them the console prints before it says how many are left.
+const ASSETS_SHOWN: usize = 200;
+
+/// The map's tiles, in the order its own list gives them, with what each holds.
+///
+/// That order is the map's own numbering and not a sort: an entry point and a track file name
+/// a tile by its place in this list, so this is the list a person has to see to make sense of
+/// either of them.
+fn tiles(session: &Session) -> String {
+    let all = session.tiles();
+    if all.is_empty() {
+        return "This map lists no tile at all".into();
+    }
+    let lines: Vec<String> = all
+        .iter()
+        .enumerate()
+        .map(|(i, tile)| format!("{i:>3}  {}", one_tile(session, *tile, "")))
+        .collect();
+    lines.join("\n")
+}
+
+/// One tile as a line: where it is, its file, and what it holds.
+fn one_tile(session: &Session, tile: (i32, i32), note: &str) -> String {
+    let fresh = session.doc().new_tiles().any(|t| t == tile);
+    format!(
+        "({}, {})  {}  {} object(s){}{}",
+        tile.0,
+        tile.1,
+        tile_file_name(tile),
+        session.objects_in(tile),
+        if fresh { "  [added, not written yet]" } else { "" },
+        if note.is_empty() { String::new() } else { format!("  {note}") }
+    )
+}
+
 /// Three numbers, whether written `1 2 3` or `1,2,3`.
 fn need_vec3(rest: &[&str], i: usize, usage: &str) -> Result<DVec3> {
     let joined = rest[i.min(rest.len())..].join(" ");
@@ -354,7 +486,7 @@ mod tests {
     fn the_help_lists_every_command_the_parser_knows() {
         for c in [
             "info", "ls", "sel", "where", "variants", "mv", "move", "turn", "face", "del", "undel", "reset", "place", "brush", "raise", "lower",
-            "flatten", "flatten-to", "undo", "redo", "history", "save", "help", "quit",
+            "flatten", "flatten-to", "undo", "redo", "history", "save", "help", "quit", "assets", "new", "arm", "tiles", "tile add", "tile rm",
         ] {
             assert!(HELP.contains(c), "help does not mention {c}");
         }

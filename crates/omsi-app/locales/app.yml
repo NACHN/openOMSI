@@ -21629,6 +21629,26 @@ _version: 2
 "A save writes the map's own files, with a .openomsi-bak snapshot each":
   zh: "保存会写入地图自己的文件，每个文件各留一份 .openomsi-bak 快照"
   zh-tw: "儲存會寫入地圖自己的檔案，每個檔案各留一份 .openomsi-bak 快照"
+"A tile is on the ground once the map is written.":
+  zh: "写入地图后，瓦片才会出现在地面上。"
+  zh-tw: "寫入地圖後，瓦片才會出現在地面上。"
+
+"Add the tile under the pointer":
+  zh: "添加准星所在的瓦片"
+  zh-tw: "新增準星所在的瓦片"
+
+"Assets":
+  zh: "素材库"
+  zh-tw: "素材庫"
+
+"Brush radius":
+  zh: "笔刷半径"
+  zh-tw: "筆刷半徑"
+
+"Choose a .sco to put down":
+  zh: "选一个 .sco 放下去"
+  zh-tw: "選一個 .sco 放下去"
+
 "Choose something first.":
   zh: "请先选中一个物体。"
   zh-tw: "請先選中一個物件。"
@@ -21638,6 +21658,10 @@ _version: 2
 "Chosen object":
   zh: "选中的物体"
   zh-tw: "選中的物件"
+"Click a scenery object to look at it":
+  zh: "点一个景物对象，看它长什么样"
+  zh-tw: "點一個景物物件，看它長什麼樣"
+
 "Click to write copies instead.":
   zh: "单击可改为写入副本"
   zh-tw: "單擊可改為寫入副本"
@@ -21650,6 +21674,14 @@ _version: 2
 "Commands work here as they did in the terminal: help lists them.":
   zh: "这里的命令和终端里一样：输入 help 查看列表。"
   zh-tw: "這裡的指令和終端裡一樣：輸入 help 查看清單。"
+"Do again":
+  zh: "重做"
+  zh-tw: "重做"
+
+"Edit the map's tiles":
+  zh: "编辑地图的瓦片"
+  zh-tw: "編輯地圖的瓦片"
+
 "Face aim":
   zh: "朝向准星"
   zh-tw: "朝向準星"
@@ -21659,9 +21691,25 @@ _version: 2
 "Fold the console away":
   zh: "收起命令面板"
   zh-tw: "收起指令面板"
+"Hide the tool options":
+  zh: "隐藏工具选项"
+  zh-tw: "隱藏工具選項"
+
+"History":
+  zh: "历史"
+  zh-tw: "歷史"
+
 "How far an arrow key moves and turns - click to change":
   zh: "方向键移动和旋转的步长 - 单击切换"
   zh-tw: "方向鍵移動和旋轉的步長 - 單擊切換"
+"Inspector":
+  zh: "检查器"
+  zh-tw: "檢查器"
+
+"Left click adds the tile under the pointer · the map's own go back out of it":
+  zh: "左键加上指针所在的瓦片 · 地图已有的瓦片则被移出去"
+  zh-tw: "左鍵加入指標所在的瓦片 · 地圖已有的瓦片則被移出去"
+
 "Left click chooses what the pointer is on":
   zh: "左键选中指针所指的物体"
   zh-tw: "左鍵選中指標所指的物件"
@@ -21671,12 +21719,28 @@ _version: 2
 "Left click puts a copy where the pointer meets the ground":
   zh: "左键在指针与地面的交点上放置副本"
   zh-tw: "左鍵在指標與地面的交點上放置副本"
+"Left click puts a new object of the held .sco down":
+  zh: "左键在准星处放下手中的 .sco 新建一个物体"
+  zh-tw: "左鍵在準星處放下手中的 .sco 新建一個物件"
+
 "Left click raises the ground by the step · Shift lowers it":
   zh: "左键按步长升高地面 · Shift 降低"
   zh-tw: "左鍵按步長升高地面 · Shift 降低"
 "Left click takes away what the pointer is on":
   zh: "左键移除指针所指的物体"
   zh-tw: "左鍵移除指標所指的物件"
+"Let go of it: a click copies the selection again":
+  zh: "放开它：点击又变回复制选中物体"
+  zh-tw: "放開它：點擊又變回複製選中物件"
+
+"Let it go: a click copies the selection again":
+  zh: "放开它：点击又变回复制选中物体"
+  zh-tw: "放開它：點擊又變回複製選中物件"
+
+"Look through the folders again":
+  zh: "重新扫描这些文件夹"
+  zh-tw: "重新掃描這些資料夾"
+
 "Move":
   zh: "移动"
   zh-tw: "移動"
@@ -21686,21 +21750,53 @@ _version: 2
 "No changes yet":
   zh: "尚无改动"
   zh-tw: "尚無變更"
+"No object answers to that. Point at one and click it instead, or clear the filter.":
+  zh: "没有物体符合这个筛选。可以直接左键点选，或清空筛选。"
+  zh-tw: "沒有物件符合這個篩選。可以直接左鍵點選，或清空篩選。"
+
+"No scenery object here answers to that.":
+  zh: "这里没有符合的素材库物体。"
+  zh-tw: "這裡沒有符合的素材庫物件。"
+
+"Nothing is waiting to be written.":
+  zh: "没有待写入的内容。"
+  zh-tw: "沒有待寫入的內容。"
+
 "Nothing to do again":
   zh: "没有可重做的操作"
   zh-tw: "沒有可重做的操作"
 "Nothing to take back":
   zh: "没有可撤销的操作"
   zh-tw: "沒有可復原的操作"
+"Nothing to take back. A save drops the list: the steps before it were measured against a map that is no longer the one on disk.":
+  zh: "没有可撤销的操作。保存会清空这个列表：保存之前的每一步，都是相对一份磁盘上已不存在的地图量出来的。"
+  zh-tw: "沒有可復原的操作。儲存會清空這個清單：儲存之前的每一步，都是相對一份磁碟上已不存在的地圖量出來的。"
+
 "Nothing under the pointer.":
   zh: "指针下没有物体。"
   zh-tw: "指標下沒有物件。"
+"Objects":
+  zh: "物体"
+  zh-tw: "物件"
+
+"Only what changed":
+  zh: "只看改动"
+  zh-tw: "只看變更"
+
 "Open the console":
   zh: "展开命令面板"
   zh-tw: "展開指令面板"
+"Outline":
+  zh: "大纲"
+  zh-tw: "大綱"
+
 "Place a copy":
   zh: "放置副本"
   zh-tw: "放置副本"
+"Place an object":
+  zh: "放置物体"
+  zh-tw: "放置物件"
+
 "Point at something and click, or type `sel <id>` below.":
   zh: "指向某个物体并单击，或在下方输入 `sel <id>`。"
   zh-tw: "指向某個物件並單擊，或在下方輸入 `sel <id>`。"
@@ -21710,6 +21806,10 @@ _version: 2
 "Put it back as it was":
   zh: "恢复原样"
   zh-tw: "還原原樣"
+"Putting down":
+  zh: "放置内容"
+  zh-tw: "放置內容"
+
 "Raise the ground":
   zh: "升高地面"
   zh-tw: "升高地面"
@@ -21719,12 +21819,28 @@ _version: 2
 "Select":
   zh: "选择"
   zh-tw: "選擇"
+"Step":
+  zh: "步长"
+  zh-tw: "步長"
+
+"Take back":
+  zh: "撤销"
+  zh-tw: "復原"
+
 "Take away":
   zh: "移除"
   zh-tw: "移除"
+"The place tool holds":
+  zh: "放置工具手中持有"
+  zh-tw: "放置工具手中持有"
+
 "The pointer is not on any ground.":
   zh: "指针没有落在地面上。"
   zh-tw: "指標沒有落在地面上。"
+"Take this tile out of the map":
+  zh: "把这个瓦片移出地图"
+  zh-tw: "把這個瓦片移出地圖"
+
 "The game reads that copy before the original map, which is never touched.":
   zh: "游戏会先读取这份副本，原地图文件不会被改动。"
   zh-tw: "遊戲會先讀取這份副本，原地圖檔案不會被更動。"
@@ -21734,12 +21850,48 @@ _version: 2
 "The map is flown with W A S D, Q and E, the right button turns the view.":
   zh: "用 W A S D、Q E 飞行，按住鼠标右键转动视角。"
   zh-tw: "用 W A S D、Q E 飛行，按住滑鼠右鍵轉動視角。"
+"The tile tool (T) rings the map's tiles on the map itself: click one to add it, or one the map has to take it out.":
+  zh: "瓦片工具（T）直接在地图上框出瓦片：点空格加一块，点已有的把它移出去。"
+  zh-tw: "瓦片工具（T）直接在地圖上框出瓦片：點空格加一塊，點已有的把它移出去。"
+
+"The view is too flat to say which tile the pointer is on.":
+  zh: "视线太平，说不清指针在哪块瓦片上。"
+  zh-tw: "視線太平，說不清指標在哪塊瓦片上。"
+
+"There is no Sceneryobjects folder here, so there is nothing to build a map out of.":
+  zh: "这里没有 Sceneryobjects 文件夹，也就没有可用来搭地图的素材。"
+  zh-tw: "這裡沒有 Sceneryobjects 資料夾，也就沒有可用來搭地圖的素材。"
+
+"Tiles":
+  zh: "瓦片"
+  zh-tw: "瓦片"
+
+"Tool options":
+  zh: "工具选项"
+  zh-tw: "工具選項"
+
+"Tool settings":
+  zh: "工具设置"
+  zh-tw: "工具設定"
+
 "Turn":
   zh: "旋转"
   zh-tw: "旋轉"
+"Turn step":
+  zh: "旋转步长"
+  zh-tw: "旋轉步長"
+
+"Unsaved":
+  zh: "未写入"
+  zh-tw: "未寫入"
+
 "Variant":
   zh: "变体"
   zh-tw: "變體"
+"Write it now":
+  zh: "立即写入"
+  zh-tw: "立即寫入"
+
 "Writes copies":
   zh: "写入副本"
   zh-tw: "寫入副本"
@@ -21758,6 +21910,14 @@ _version: 2
 "could not save":
   zh: "无法保存"
   zh-tw: "無法儲存"
+"is in the place tool":
+  zh: "已装入放置工具"
+  zh-tw: "已裝入放置工具"
+
+"name or folder":
+  zh: "名称或文件夹"
+  zh-tw: "名稱或資料夾"
+
 "pointer":
   zh: "指针"
   zh-tw: "指標"
@@ -21773,6 +21933,10 @@ _version: 2
 "position":
   zh: "位置"
   zh-tw: "位置"
+"scenery objects":
+  zh: "个素材库物体"
+  zh-tw: "個素材庫物件"
+
 "step":
   zh: "步长"
   zh-tw: "步長"
@@ -21794,6 +21958,30 @@ _version: 2
 "turn":
   zh: "转角"
   zh-tw: "轉角"
+"ground":
+  zh: "地面"
+  zh-tw: "地面"
+
+"id or .sco":
+  zh: "编号或 .sco"
+  zh-tw: "編號或 .sco"
+
+"placed":
+  zh: "放置"
+  zh-tw: "放置"
+
+"steps done":
+  zh: "已完成步骤"
+  zh-tw: "已完成步驟"
+"not written yet":
+  zh: "尚未写入"
+  zh-tw: "尚未寫入"
+
+"the tile list has changed":
+  zh: "瓦片列表已改动"
+  zh-tw: "瓦片清單已變更"
+
+
 
 # ---- the editor's start page -------------------------------------------------------------
 

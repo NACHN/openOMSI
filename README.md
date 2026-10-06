@@ -129,6 +129,7 @@ pages live in [`docs/`](docs):
 | [Building](docs/BUILDING.md) | building from source on macOS, Windows, Linux and Android |
 | [Content formats](docs/FORMATS.md) | every OMSI 2 file format |
 | [Architecture](docs/ARCHITECTURE.md) | crates, threading, renderer, roadmap |
+| [The map editor](docs/EDITOR.md) | the editor program: what it can do, and the order it grows in |
 | [Routes](docs/ROUTES.md) | how the original runs timetables, chrono, HOF, IBIS |
 | [Plugins](docs/PLUGINS.md) | Lua plugins (API and examples), OMSI plugin DLLs and the 32-bit plugin host |
 | [Dedicated server](docs/SERVER.md) | hosting a session without a window |

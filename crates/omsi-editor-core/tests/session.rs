@@ -575,3 +575,252 @@ fn a_batch_is_taken_back_as_one_step() {
     h.undo(&mut doc).unwrap();
     assert!(!doc.is_dirty());
 }
+
+// ---- the map's own list of tiles -------------------------------------------------------
+
+#[test]
+fn an_added_tile_is_written_and_a_map_opened_again_has_it() {
+    let f = Fixture::new("add-tile");
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+
+    let tile = (2, 0);
+    assert!(!session.has_tile(tile));
+    session.add_tile(tile).unwrap();
+    assert!(session.has_tile(tile));
+    assert!(session.doc().is_dirty(), "a map that gained a tile is not clean");
+    // it is the third entry of the list, so nothing that numbers a tile has moved
+    assert_eq!(session.tile_index(tile), Some(2));
+
+    let report = session.save().unwrap();
+    assert!(report.listed, "the map's own file was not written");
+    assert_eq!(report.made, 1);
+    assert!(!session.doc().is_dirty());
+
+    // the copy the game reads first holds the tile: the list, the file, and its ground
+    let copy = f.content().join("maps").join("Tiny");
+    let global = std::fs::read_to_string(copy.join("global.cfg")).unwrap();
+    assert!(global.contains("tile_2_0.map"), "{global:?}");
+    assert!(copy.join("tile_2_0.map").exists());
+    assert!(copy.join("tile_2_0.map.terrain").exists());
+    // and the map that was there is untouched, byte for byte
+    assert_eq!(f.text(&f.map_cfg()), GLOBAL);
+
+    // a session opened on it again finds the tile, in its place in the list
+    let again = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    assert!(again.has_tile(tile));
+    assert_eq!(again.tiles(), vec![(0, 0), (1, 0), (2, 0)]);
+    let t = omsi_map::Tile::load(&copy.join("tile_2_0.map")).unwrap();
+    assert!(t.objects.is_empty() && t.splines.is_empty());
+}
+
+#[test]
+fn a_tile_taken_out_goes_with_what_was_in_it_and_comes_back_whole() {
+    let f = Fixture::new("remove-tile");
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    // the second tile of the fixture holds one object
+    assert_eq!(session.objects_in((1, 0)), 1);
+    session.select(Some(200));
+    assert!(session.selection().is_some());
+
+    session.remove_tile((1, 0)).unwrap();
+    assert!(!session.has_tile((1, 0)));
+    assert_eq!(session.objects_in((1, 0)), 0);
+    // what was chosen stood in that tile, and something no longer in the map cannot go on
+    // being chosen
+    assert_eq!(session.selected_id(), None);
+    assert!(session.doc().is_dirty());
+
+    // one step back: the tile, the object that was in it, and the list as it was
+    session.undo().unwrap();
+    assert!(session.has_tile((1, 0)));
+    assert_eq!(session.objects_in((1, 0)), 1);
+    assert_eq!(session.tiles(), vec![(0, 0), (1, 0)]);
+
+    // and a save of the removal leaves the tile's own file where it is
+    session.remove_tile((1, 0)).unwrap();
+    session.save().unwrap();
+    let global = std::fs::read_to_string(f.content().join("maps").join("Tiny").join("global.cfg")).unwrap();
+    assert!(!global.contains("tile_1_0.map"), "{global:?}");
+    assert!(f.installed("maps/Tiny/tile_1_0.map").exists(), "the tile's own file was deleted");
+}
+
+#[test]
+fn a_map_with_tracks_refuses_a_removal_that_would_renumber_the_tiles() {
+    let f = Fixture::new("tracks");
+    // a timetable of any kind: a track file names its tile by the tile's place in the list
+    std::fs::create_dir_all(f.installed("maps/Tiny/TTData")).unwrap();
+    std::fs::write(f.installed("maps/Tiny/TTData/route.ttr"), "[track_entry]\r\n").unwrap();
+
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    // (0, 0) is the first of two, so taking it out would move the other down to number 0
+    let err = session.remove_tile((0, 0)).unwrap_err();
+    assert!(format!("{err}").contains("track"), "{err}");
+    assert!(session.has_tile((0, 0)), "the tile went anyway");
+
+    // the last one can still go: nothing after it changes its number
+    session.remove_tile((1, 0)).unwrap();
+    assert!(!session.has_tile((1, 0)));
+}
+
+#[test]
+fn an_entry_point_standing_in_a_tile_stops_that_tile_from_going() {
+    let f = Fixture::new("entry-point");
+    let global = format!("[entrypoints]\n1\n0\n0\n0\n150\n0\n150\n0\n0\n0\n1\n0\nStart\n\n{GLOBAL}");
+    std::fs::write(f.map_cfg(), &global).unwrap();
+
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    let err = session.remove_tile((0, 0)).unwrap_err();
+    assert!(format!("{err}").contains("entry point"), "{err}");
+    assert!(session.has_tile((0, 0)), "the tile went anyway");
+}
+
+#[test]
+fn the_tile_list_is_edited_as_text_and_the_rest_of_the_file_is_kept() {
+    let f = Fixture::new("global-text");
+    // a map whose own file holds a keyword this project does not know
+    let text = format!("[friendlyname]\nTiny\n\n[myownkeyword]\nwhatever it means\n\n{GLOBAL}");
+    std::fs::write(f.map_cfg(), &text).unwrap();
+
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    session.add_tile((2, 0)).unwrap();
+    session.save().unwrap();
+
+    let saved = std::fs::read_to_string(f.content().join("maps").join("Tiny").join("global.cfg")).unwrap();
+    let inserted = "\n[map]\n2\n0\ntile_2_0.map\n";
+    assert!(saved.contains(inserted), "{saved:?}");
+    assert_eq!(saved.replace(inserted, ""), text, "something else in the file changed");
+}
+
+// ---- an object out of the content folder -----------------------------------------------
+
+/// A `.sco` in the content folder that no map holds - what the assets list offers. Returns it
+/// spelled the way a record spells it.
+fn put_a_sco(f: &Fixture, rel: &str) -> String {
+    let p = f.installed(rel);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, "[mesh]\r\nthing.o3d\r\n").unwrap();
+    rel.replace('/', "\\")
+}
+
+#[test]
+fn an_object_no_map_holds_can_be_placed_and_is_there_after_a_reopen() {
+    let f = Fixture::new("place-fresh");
+    let sco = put_a_sco(&f, "Sceneryobjects/New/thing.sco");
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    let in_the_map = session.doc().object_count();
+
+    session.place_asset(&sco, DVec3::new(20.0, 30.0, 0.0), 45.0).unwrap();
+    let id = session.selected_id().expect("the new object is chosen");
+    assert_eq!(session.doc().object_count(), in_the_map, "a placed object is not a map object yet");
+    assert_eq!(session.doc().added_count(), 1, "nothing new was placed");
+    assert!(session.doc().is_dirty(), "a map that grew is not clean");
+
+    let report = session.save().unwrap();
+    assert_eq!(report.objects, 1, "{}", report.describe());
+
+    // the record is in the file the game reads, and it says where the object stands - the
+    // place is tile-local, which for tile (0, 0) is the same numbers
+    let written = f.text(&f.written("maps/Tiny/tile_0_0.map"));
+    let added = format!("\r\n[object]\r\n0\r\n{sco}\r\n{id}\r\n20\r\n30\r\n0\r\n45\r\n0\r\n0\r\n0\r\n\r\n");
+    assert!(written.contains(&added), "{written:?}");
+    // and nothing else in that file changed: not a line, not an ending
+    assert_eq!(written.replace(&added, ""), TILE_A, "something else in the tile changed");
+    // the map that was there is untouched, and the record is only in the copy
+    assert_eq!(f.text(&f.map_cfg()).lines().count(), GLOBAL.lines().count());
+    assert!(!f.text(&f.installed("maps/Tiny/tile_0_0.map")).contains(&sco));
+
+    // opened again, the object is in the map like any other - and nothing is unsaved
+    let again = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    assert!(!again.doc().is_dirty(), "a map written and opened again has nothing to save");
+    let back = again.doc().objects().find(|(_, o)| o.file == sco).expect("the placed object").1.clone();
+    assert_eq!(back.tile, (0, 0));
+    assert_eq!(back.pos, DVec3::new(20.0, 30.0, 0.0));
+    assert_eq!(back.heading, 45.0);
+    assert_eq!(again.objects_in((0, 0)), 3);
+    assert_eq!(again.selected_id(), None);
+}
+
+#[test]
+fn a_place_that_cannot_be_a_record_is_refused_and_changes_nothing() {
+    let f = Fixture::new("place-refusals");
+    let sco = put_a_sco(&f, "Sceneryobjects/New/thing.sco");
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+
+    // a file that is not a scenery object at all
+    let e = session.place_asset("Sceneryobjects\\New\\thing.o3d", DVec3::new(1.0, 1.0, 0.0), 0.0).unwrap_err();
+    assert!(format!("{e}").contains(".sco"), "{e}");
+    // a `.sco` the content folder does not have
+    let e = session.place_asset("Sceneryobjects\\Nowhere\\thing.sco", DVec3::new(1.0, 1.0, 0.0), 0.0).unwrap_err();
+    assert!(format!("{e}").contains("no such file"), "{e}");
+    // a place in a tile the map does not list: a record there would be dropped by the first
+    // save, so it is refused rather than lost in silence
+    let far = omsi_map::tile_size() * 9.0 + 1.0;
+    let e = session.place_asset(&sco, DVec3::new(far, 1.0, 0.0), 0.0).unwrap_err();
+    assert!(format!("{e}").contains("not in this map"), "{e}");
+
+    // and a refusal is not an edit: nothing to take back, nothing to write
+    assert_eq!(session.doc().added_count(), 0);
+    assert!(!session.doc().is_dirty());
+    assert!(!session.history().can_undo());
+    assert_eq!(session.selected_id(), None);
+}
+
+#[test]
+fn putting_an_object_down_is_one_step_to_take_back() {
+    let f = Fixture::new("place-undo");
+    let sco = put_a_sco(&f, "Sceneryobjects/New/thing.sco");
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    session.place_asset(&sco, DVec3::new(20.0, 30.0, 0.0), 0.0).unwrap();
+    let id = session.selected_id().unwrap();
+
+    session.undo().unwrap();
+    assert_eq!(session.doc().added_count(), 0);
+    assert!(!session.doc().is_dirty(), "an undone placement is not something to write");
+
+    session.redo().unwrap();
+    assert_eq!(session.doc().added_count(), 1);
+    assert_eq!(session.doc().added_object(id).map(|a| a.sco.clone()), Some(sco));
+}
+
+#[test]
+fn arming_a_file_is_not_an_edit_and_a_blank_name_arms_nothing() {
+    let f = Fixture::new("arm");
+    let sco = put_a_sco(&f, "Sceneryobjects/New/thing.sco");
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    assert_eq!(session.armed_asset(), None);
+
+    session.arm_asset(Some(sco.clone()));
+    assert_eq!(session.armed_asset(), Some(sco.as_str()));
+    assert!(!session.doc().is_dirty(), "arming is not a change to the map");
+    assert!(!session.history().can_undo());
+
+    // a name that is nothing is not a file, and the tool must not be left holding one
+    session.arm_asset(Some("   ".into()));
+    assert_eq!(session.armed_asset(), None);
+}
+
+#[test]
+fn a_brand_new_tile_takes_a_brand_new_object() {
+    let f = Fixture::new("place-in-new-tile");
+    let sco = put_a_sco(&f, "Sceneryobjects/New/thing.sco");
+    let mut session = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    let ts = omsi_map::tile_size();
+    session.add_tile((2, 0)).unwrap();
+    session.place_asset(&sco, DVec3::new(ts * 2.0 + 7.0, 9.0, 0.0), 90.0).unwrap();
+
+    let report = session.save().unwrap();
+    assert!(report.listed, "the map's own file was not written");
+    assert_eq!(report.made, 1);
+
+    // the tile the map just gained, with the object on it - and the place is what it is
+    // *within the tile*, not its place on the map
+    let written = f.text(&f.written("maps/Tiny/tile_2_0.map"));
+    assert!(written.contains(&format!("{sco}\r\n")), "{written:?}");
+    assert!(written.contains("\r\n7\r\n9\r\n0\r\n90\r\n"), "the place is not tile-local: {written:?}");
+    // one blank line between the tile's own keywords and the record, not two
+    assert!(written.contains("[variable_terrain]\r\n\r\n[object]\r\n"), "{written:?}");
+
+    let again = Session::open(f.map_cfg(), Destination::Content(f.content())).unwrap();
+    assert!(again.has_tile((2, 0)));
+    assert_eq!(again.objects_in((2, 0)), 1);
+}

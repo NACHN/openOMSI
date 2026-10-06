@@ -9,6 +9,7 @@ const DOCS = [
   { file: "BUILDING", title: "Building", icon: "build" },
   { file: "FORMATS", title: "Content formats", icon: "description" },
   { file: "ARCHITECTURE", title: "Architecture", icon: "account_tree" },
+  { file: "EDITOR", title: "The map editor", icon: "edit" },
   { file: "ROUTES", title: "Routes", icon: "alt_route" },
   { file: "PLUGINS", title: "Plugins", icon: "extension" },
   { file: "SERVER", title: "Dedicated server", icon: "dns" },

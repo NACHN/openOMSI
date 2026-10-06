@@ -96,7 +96,7 @@ pub fn clean_name(name: &str) -> Result<String, EditError> {
 /// The files of a map that has nothing in it yet.
 fn write_map(dir: &Path, name: &str) -> Result<(), EditError> {
     write_utf16(&dir.join("global.cfg"), &global_text(name))?;
-    write_utf16(&dir.join(tile_file(FIRST_TILE)), &TILE)?;
+    write_utf16(&dir.join(tile_file(FIRST_TILE)), &EMPTY_TILE)?;
     // the ground: flat, and written the way OMSI writes a height field
     let terrain = dir.join(format!("{}.terrain", tile_file(FIRST_TILE)));
     std::fs::write(&terrain, Terrain::flat().to_bytes()).map_err(|e| EditError::io(&terrain, e))?;
@@ -138,7 +138,7 @@ fn global_text(name: &str) -> String {
 
 /// A tile with nothing in it but its version: no object, no spline, and the terrain beside it
 /// rather than in it (which is where OMSI keeps the heights: `tile_0_0.map.terrain`).
-const TILE: &str = "[version]\r\n14\r\n\r\n[terrain]\r\n\r\n\r\n[variable_terrainlightmap]\r\n\r\n[variable_terrain]\r\n\r\n";
+pub(crate) const EMPTY_TILE: &str = "[version]\r\n14\r\n\r\n[terrain]\r\n\r\n\r\n[variable_terrainlightmap]\r\n\r\n[variable_terrain]\r\n\r\n";
 
 #[cfg(test)]
 mod tests {

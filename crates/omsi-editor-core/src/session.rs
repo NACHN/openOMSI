@@ -7,9 +7,9 @@
 //! the in-game editor's keystrokes touching the world directly.
 
 use crate::command::{Command, History};
-use crate::document::{file_name_of, folder_of, Destination, Document, NewObject, ObjectRef, SaveReport};
+use crate::document::{file_name_of, folder_of, Destination, Document, NewObject, ObjectRef, SaveReport, TileId};
 use crate::ground::{GroundAction, BRUSH_DEFAULT, BRUSH_MAX, BRUSH_MIN};
-use crate::record::ObjectEdit;
+use crate::record::{blank_object_record, ObjectEdit};
 use crate::EditError;
 use glam::DVec3;
 
@@ -55,6 +55,10 @@ pub struct Session {
     history: History,
     selection: Option<i64>,
     brush: f64,
+    /// The `.sco` from the content folder that a click on the ground will put down, when the
+    /// place tool is holding one instead of copying the selection. See
+    /// [`Session::arm_asset`].
+    armed: Option<String>,
     /// A drag in progress: the object it is on, and what had been done to it when it began.
     /// See [`Session::begin_gesture`].
     dragging: Option<(i64, ObjectEdit)>,
@@ -67,6 +71,7 @@ impl Session {
             history: History::new(),
             selection: None,
             brush: BRUSH_DEFAULT,
+            armed: None,
             dragging: None,
         })
     }
@@ -314,6 +319,81 @@ impl Session {
         Ok(out)
     }
 
+    // ---- what a click puts down ------------------------------------------------------
+
+    /// Arm the place tool with a `.sco` out of the content folder: a click on the ground then
+    /// puts a **new** object of that file down, rather than a copy of the chosen one.
+    ///
+    /// This is the one thing a copy cannot do - an object no map holds yet can be placed (see
+    /// [`Session::place_asset`]). `None` gives the tool back to the selection.
+    ///
+    /// Arming is not an edit: nothing of the map changes, so a save has nothing more to write
+    /// and there is no step to take back. It is tool state, like the brush's radius, and it
+    /// lives here for the same reason - so that both front ends mean the same thing by it.
+    pub fn arm_asset(&mut self, sco: Option<String>) -> Option<String> {
+        // (a blank name counts as nothing armed: no click should be able to place an object
+        // whose file it could not name)
+        std::mem::replace(&mut self.armed, sco.filter(|s| !s.trim().is_empty()))
+    }
+
+    /// The `.sco` the place tool is holding, if it is holding one.
+    pub fn armed_asset(&self) -> Option<&str> {
+        self.armed.as_deref()
+    }
+
+    /// Put a **new** object of `sco` down at `at`, facing `heading` (degrees clockwise from
+    /// north).
+    ///
+    /// `sco` is a record's own path - `Sceneryobjects\Berlin\House1.sco` - and is resolved
+    /// against [`Document::install_root`]: the file has to be there, in the installation or in
+    /// the content folder, but it does **not** have to be in this map or in any other. The
+    /// record is written from nothing ([`blank_object_record`]) instead of being copied from
+    /// an object that is already placed, which is what lets a map grow rather than only
+    /// rearrange what somebody else put in it.
+    ///
+    /// `at` has to fall in a tile the map lists. A record belongs to a tile, and one written
+    /// into a tile that is not part of the map would be dropped by the first save without a
+    /// word, so that is refused here instead. Only x and y are taken from `at`: an object's
+    /// own z is a height *over* the terrain (see [`Selection::position`]), so the new record
+    /// gets `0` and stands on the ground wherever the ground is.
+    ///
+    /// The new object becomes the selection, and one placement is one step to take back.
+    pub fn place_asset(&mut self, sco: &str, at: DVec3, heading: f64) -> Result<Option<String>, EditError> {
+        let sco = sco.trim().replace('/', "\\");
+        if !sco.to_ascii_lowercase().ends_with(".sco") {
+            return Err(EditError::Other(format!("{sco}: a scenery object is a .sco file")));
+        }
+        let root = self.doc.install_root().to_path_buf();
+        if !omsi_cfg::vfs::is_file(&omsi_cfg::resolve_path(&root, &sco)) {
+            return Err(EditError::Other(format!("{sco}: no such file under {}", root.display())));
+        }
+        let (tile, (lx, ly)) = omsi_map::world_to_tile_local(at.x, at.y);
+        if !self.has_tile(tile) {
+            return Err(EditError::NoTile(tile.0, tile.1));
+        }
+        let id = self.doc.next_id();
+        let new = NewObject {
+            // no template: this object is not a copy of anything, and nothing of its record
+            // is taken from another one
+            template: None,
+            tile,
+            id,
+            file: file_name_of(&sco),
+            base: DVec3::new(at.x, at.y, 0.0),
+            base_heading: heading,
+            // the lines below already say where it stands and which way it faces, so there is
+            // nothing to measure them against - see `NewObject::record`
+            moved: DVec3::ZERO,
+            turned: 0.0,
+            deleted: false,
+            sco: sco.clone(),
+            template_record: blank_object_record(&sco, id, DVec3::new(lx, ly, 0.0), heading),
+        };
+        let out = self.do_(Command::PlaceObject(new))?;
+        self.selection = Some(id);
+        Ok(out)
+    }
+
     /// Give the selected placed object another `.sco` of its folder.
     pub fn set_selected_variant(&mut self, sco: String) -> Result<Option<String>, EditError> {
         let id = self.selection.ok_or(EditError::Other("nothing is selected".into()))?;
@@ -335,6 +415,61 @@ impl Session {
             .collect();
         out.sort();
         out
+    }
+
+    // ---- the map's own list of tiles -------------------------------------------------
+
+    /// The map's tiles, in the order its own list gives them.
+    ///
+    /// The order is the map's numbering, not a sort: an entry point and a track file name a
+    /// tile by its place here, so this is what a front end shows when it shows "the tiles".
+    pub fn tiles(&self) -> Vec<TileId> {
+        crate::tilemap::map_entries(self.doc().global_text()).iter().map(|e| (e.x, e.y)).collect()
+    }
+
+    /// Whether the map lists this tile.
+    pub fn has_tile(&self, tile: TileId) -> bool {
+        self.doc().tiles().any(|t| t == tile)
+    }
+
+    /// Where a tile sits in the map's list - the number an entry point names it by.
+    pub fn tile_index(&self, tile: TileId) -> Option<usize> {
+        self.doc().tile_index(tile)
+    }
+
+    /// The tile a place on the map falls in. What "add a tile here" means.
+    pub fn tile_at(&self, at: DVec3) -> TileId {
+        omsi_map::world_to_tile_local(at.x, at.y).0
+    }
+
+    /// How many of the map's objects stand in a tile.
+    pub fn objects_in(&self, tile: TileId) -> usize {
+        self.doc().objects_in(tile).count()
+    }
+
+    /// Whether the map has a timetable - any track file at all - which decides whether a tile
+    /// can be taken out of the middle of the list (see [`Document::has_tracks`]).
+    pub fn has_tracks(&self) -> bool {
+        self.doc().has_tracks()
+    }
+
+    /// Add the tile at `tile` to the map: one step, like everything else here.
+    pub fn add_tile(&mut self, tile: TileId) -> Result<Option<String>, EditError> {
+        self.do_(Command::AddTile { tile })
+    }
+
+    /// Take the tile at `tile` out of the map, and everything that was in it with it.
+    ///
+    /// The tile's file is left on disk. What is refused, and why, is the document's business -
+    /// it comes back as the error, to be shown where the click was.
+    pub fn remove_tile(&mut self, tile: TileId) -> Result<Option<String>, EditError> {
+        let out = self.do_(Command::RemoveTile { tile })?;
+        // what was chosen may have been standing in that tile, and something that is no longer
+        // in the map cannot go on being chosen
+        if self.selection.is_some() && self.selection().is_none() {
+            self.selection = None;
+        }
+        Ok(out)
     }
 
     // ---- the ground ------------------------------------------------------------------

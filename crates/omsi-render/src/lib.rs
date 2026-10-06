@@ -990,6 +990,10 @@ pub struct Instance {
     /// picture: the driver at the wheel while the player looks from the driver's seat (the
     /// figure would fill the view, but the mirrors show him as OMSI does).
     pub mirror_only: bool,
+    /// Drawn into the editor's outline mask and not into the picture at all (see
+    /// [`Renderer::set_outline_only`]): what the editor rings without wanting to see - the tile
+    /// grid is a square the size of a tile per tile, and the ring round it is the whole point.
+    pub outline_only: bool,
     /// The model marks the mesh `[shadow]`: one OMSI casts a shadow from (with the
     /// option `omsi_shadow_casters` only these do).
     pub omsi_caster: bool,
@@ -5732,6 +5736,7 @@ impl Renderer {
             any_distance: false,
             near_only: None,
             mirror_only: false,
+            outline_only: false,
             omsi_caster: false,
             ordered: false,
             casts_shadow: true,
@@ -5783,6 +5788,7 @@ impl Renderer {
             any_distance: false,
             near_only: None,
             mirror_only: false,
+            outline_only: false,
             omsi_caster: false,
             ordered: false,
             casts_shadow: false,
@@ -5896,6 +5902,21 @@ impl Renderer {
                 i.roof = roof;
                 Self::mark_changed(scene, instance);
             }
+        }
+    }
+
+    /// Draw an instance into the editor's outline mask and never into the picture.
+    ///
+    /// The outline pass takes its marks from `Scene::outline` and draws them itself, so what it
+    /// rings does not have to be drawn in the picture at all - and for the editor's tile grid
+    /// that is the whole point: a tile's mark is a square the size of a tile, and a pane of that
+    /// laid over the ground is the last thing anyone wants to see. It is `visible` as well
+    /// (see `vs_outline`: an invisible instance is collapsed in the mask pass too), and the one
+    /// flag is the difference between "drawn, and also outlined" and "outlined, and nothing
+    /// else".
+    pub fn set_outline_only(&self, scene: &mut Scene, instance: usize, on: bool) {
+        if let Some(i) = scene.instances.get_mut(instance) {
+            i.outline_only = on;
         }
     }
 
@@ -8220,7 +8241,7 @@ impl Renderer {
         let cull_one = |i: usize, sizes: &mut Vec<([u64; 4], f32)>| -> Option<(usize, f32, bool)> {
             let inst = &scene.instances[i];
             let m = &scene.meshes[inst.mesh];
-            if m.ranges.is_empty() || !inst.visible || (inst.mirror_only && main_view) {
+            if m.ranges.is_empty() || !inst.visible || inst.outline_only || (inst.mirror_only && main_view) {
                 return None;
             }
             if let Some([x0, y0, x1, y1]) = inst.near_only {

@@ -392,7 +392,12 @@ pub fn show_for(
     // the bubble is the mark of a tool that only chooses. A tool with a gizmo on the object
     // has already said which one it is, and a wash drawn under the arrows (the blended pass
     // comes after the opaque one) only dims them
-    let bubble = if kind == Kind::None { bubble } else { None };
+    //
+    // The tile tool is the one that leaves nothing on an object at all, chosen or not: what it
+    // acts on is the map's tiles, which are ringed over the map instead (`crate::tiles`), and a
+    // bubble round an object in the middle of that grid would say "this is what you are
+    // editing" about the one thing that tool cannot touch.
+    let bubble = if kind == Kind::None && tool != Tool::Tiles { bubble } else { None };
     let show = Show { bubble, gizmo: gizmo.map(|g| (g.at, g.size)), kind, hot };
     (show, gizmo)
 }
@@ -492,8 +497,11 @@ impl Marks {
 // of them, so none of them is ever rebuilt.
 
 /// A triangle soup, with the material slots the renderer draws it in.
+///
+/// Shared with `crate::tiles`, whose tile marks are a square built the same way: a mark is an
+/// ordinary mesh here too, and there is one way of making one.
 #[derive(Default)]
-struct Soup {
+pub(crate) struct Soup {
     positions: Vec<Vec3>,
     normals: Vec<Vec3>,
     uvs: Vec<Vec2>,
@@ -504,7 +512,7 @@ struct Soup {
 
 impl Soup {
     /// Begin a material slot: every triangle pushed after this is drawn with material `slot`.
-    fn slot(&mut self, slot: u32) {
+    pub(crate) fn slot(&mut self, slot: u32) {
         self.ranges.push((self.indices.len() as u32, 0, slot));
     }
 
@@ -524,7 +532,7 @@ impl Soup {
         last.1 += 3;
     }
 
-    fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
+    pub(crate) fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3) {
         self.tri(a, b, c);
         self.tri(a, c, d);
     }
@@ -544,7 +552,7 @@ impl Soup {
         }
     }
 
-    fn finish(self) -> MeshData {
+    pub(crate) fn finish(self) -> MeshData {
         MeshData {
             positions: self.positions,
             normals: self.normals,

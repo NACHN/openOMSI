@@ -18,6 +18,7 @@
 //! a camera, streams tiles, and hands the panel's clicks to the core.
 
 use crate::gizmo::{self, Gizmo, Handle, Kind, Marks, Screen};
+use crate::tiles;
 use crate::ui::{Info, Panels, Start, Tool};
 use crate::view::{Shown, View};
 use anyhow::Result;
@@ -61,8 +62,15 @@ struct Drag {
 /// The chosen one comes last, and the renderer draws the marks in that order, so a chosen
 /// object under the pointer is drawn over its own pointer mark - which is what makes the two
 /// answer "what would a click take" and "what has it taken" without either hiding the other.
+///
+/// With the tile tool in hand there are no object marks at all: that tool rings tiles
+/// (`crate::tiles`), and an object's ring sitting in the middle of that grid would say
+/// something about a click that the click would not do.
 pub(crate) fn mark_outline(scene: &mut Scene, world: &host::World, shown: &Shown, pointer: Option<i64>, chosen: Option<i64>, tool: Tool) {
     scene.outline.clear();
+    if tool == Tool::Tiles {
+        return;
+    }
     let marks = [pointer.map(|id| (id, tool.mark())), chosen.map(|id| (id, Mark::Chosen))];
     for (id, mark) in marks.into_iter().flatten() {
         for instance in shown.instances_of(world, id) {
@@ -91,6 +99,9 @@ struct Editor {
     shown: Shown,
     /// The bubble round the chosen object and the gizmo it is dragged by.
     marks: Marks,
+    /// The tile grid, while the tile tool is in hand: the map's own tiles, the ring it could
+    /// grow into, and the one under the pointer (see [`tiles`]).
+    grid: tiles::Overlay,
     /// The gizmo as it stands this frame: where it is, and how long its axes are. Kept from
     /// the frame just drawn, because a handle has to be picked where it was drawn.
     gizmo_now: Option<Gizmo>,
@@ -156,6 +167,7 @@ pub fn run(root: &Path, map_cfg: Option<PathBuf>, destination: Destination) -> R
         view: None,
         shown: Shown::default(),
         marks: Marks::default(),
+        grid: tiles::Overlay::default(),
         gizmo_now: None,
         kind_now: Kind::None,
         hot: None,
@@ -328,6 +340,7 @@ impl Editor {
         self.shown = Shown::default();
         // the marks were built against the scene that has just been thrown away
         self.marks.reset();
+        self.grid.reset();
         self.gizmo_now = None;
         self.hot = None;
         self.drag = None;
@@ -366,6 +379,15 @@ impl Editor {
         // over the whole window, so the map of the last frame needs no clearing.
         let ui_frame = match (self.at_start, self.session.as_mut(), self.scene.as_mut(), self.view.as_mut()) {
             (false, Some(session), Some(scene), Some(view)) => {
+                // The map's own list of tiles, when something has changed it. A world streams
+                // the list it took when the map was opened, so a tile added to the map was
+                // not drawn and one taken out went on being drawn until the map was opened
+                // again - and this is that, without the reload: hand the list over and let
+                // the streaming below do the rest, which it does in this very frame.
+                if self.panels.tiles_changed {
+                    self.panels.tiles_changed = false;
+                    view.adopt_tiles(session);
+                }
                 // the tiles follow the camera; the frame after a tile arrives is the one that
                 // shows it
                 let stats = view.stream(renderer, scene);
@@ -394,6 +416,17 @@ impl Editor {
                     })
                     .flatten();
                 mark_outline(scene, view.world(), &self.shown, hover, session.selected_id(), tool);
+                // the tile grid, while the tile tool is in hand: the map's own tiles ringed in
+                // red, the ring it could grow into in white, and the one under the pointer in
+                // green - so a click on the map is the whole edit, and what it would do is on
+                // the screen before it is made (see `tiles`)
+                if tool == Tool::Tiles {
+                    // a level and not the ground: the ring of tiles a map could gain has no
+                    // ground under it, and that ring is where this tool works (see
+                    // `View::aim_on_the_tiles`)
+                    let at = over_map.then(|| view.aim_on_the_tiles(ndc, aspect)).flatten();
+                    self.grid.draw(renderer, scene, session, at, view.camera().position);
+                }
                 // where the gizmo is, for the frame that has to pick a handle on it: the one
                 // that was just drawn rather than one worked out again later. While a drag is
                 // in hand the frozen one is the one in use.
@@ -474,9 +507,9 @@ impl Editor {
 
     /// A left click the panels did not take: the tool in hand, aimed at the crosshair.
     ///
-    /// One click is one change and so one step to take back. A drag would be a hundred
-    /// commands unless the whole gesture became one, which is not written yet - the arrow
-    /// keys do the fine work instead.
+    /// One click is one change and so one step to take back. A drag is one step too: the
+    /// gesture runs outside the history and the single step is recorded when the button comes
+    /// up (see `Session::begin_gesture`, and the handles below).
     fn click_map(&mut self) {
         // a handle under the pointer is not the map. This comes first, because the whole point
         // of a gizmo is that dragging an arrow moves the object along that arrow - and the
@@ -487,12 +520,19 @@ impl Editor {
                 return;
             }
         }
-        let (picked, aim) = {
+        let (picked, aim, tile_aim) = {
             let (Some(view), Some(scene)) = (self.view.as_ref(), self.scene.as_ref()) else { return };
             // the pointer's own ray and not the middle of the view's: what is lit up is what
             // the click takes, and the pointer is what an editor points with
             let (eye, dir) = view.ray(self.pointer_ndc(), self.aspect());
-            (host::pick(view.world(), scene, eye, dir.as_vec3()), self.aim)
+            // `tile_aim` is the same ray against the level the tiles are drawn on rather than
+            // against the ground: outside the map there is no ground, and outside the map is
+            // where a tile is added (see `View::aim_on_the_tiles`)
+            (
+                host::pick(view.world(), scene, eye, dir.as_vec3()),
+                self.aim,
+                view.aim_on_the_tiles(self.pointer_ndc(), self.aspect()),
+            )
         };
         let tool = self.panels.tool;
         match tool {
@@ -529,11 +569,27 @@ impl Editor {
                     self.act(move |s| s.turn_selected_to(deg));
                 }
             },
-            Tool::Place => match (self.selected(), aim) {
-                (None, _) => self.panels.say("Choose the object to copy first."),
-                (_, None) => self.panels.say("The pointer is not on any ground."),
-                (Some(template), Some(at)) => self.act(move |s| s.place_copy(template, None, Some(at), 0.0)),
-            },
+            Tool::Place => {
+                // a `.sco` armed off the assets page is what a click puts down, and not a copy
+                // of the selection: an object out of the content folder is made from nothing,
+                // so it needs nothing in the map to be copied from (see
+                // `Session::place_asset`)
+                let armed = self.session.as_ref().and_then(|s| s.armed_asset()).map(str::to_string);
+                match (armed, aim) {
+                    (Some(sco), Some(at)) => {
+                        // facing the way the view faces, which is what a row of houses down a
+                        // street wants - and the same measure a turn uses
+                        let heading = self.heading_of_the_view();
+                        self.act(move |s| s.place_asset(&sco, at, heading));
+                    }
+                    (Some(_), None) => self.panels.say("The pointer is not on any ground."),
+                    (None, _) => match (self.selected(), aim) {
+                        (None, _) => self.panels.say("Choose the object to copy first."),
+                        (_, None) => self.panels.say("The pointer is not on any ground."),
+                        (Some(template), Some(at)) => self.act(move |s| s.place_copy(template, None, Some(at), 0.0)),
+                    },
+                }
+            }
             Tool::Raise => {
                 let step = self.panels.step();
                 let down = self.modifiers.shift_key();
@@ -546,6 +602,28 @@ impl Editor {
                 Some(at) => self.act(move |s| s.flatten_ground(at, None)),
                 None => self.panels.say("The pointer is not on any ground."),
             },
+            // the tile the pointer is on: one the map has goes out of it, one it has not got
+            // comes into it. Which of the two it is was on the screen before the click - the
+            // grid is red where a tile would go and white where one would come (see `tiles`) -
+            // and a refusal, which is the core's rule about what numbering a tile may move, is
+            // said out loud rather than swallowed
+            Tool::Tiles => {
+                let Some(session) = self.session.as_mut() else { return };
+                match tile_aim {
+                    None => self.panels.say("The view is too flat to say which tile the pointer is on."),
+                    Some(at) => {
+                        let tile = session.tile_at(at);
+                        // a tile the map has goes out of it, one it has not got comes into it -
+                        // and a tile added is the one that is waiting to be written, which
+                        // `Panels::add_tile` says out loud
+                        if session.has_tile(tile) {
+                            self.panels.act(session, |s| s.remove_tile(tile));
+                        } else {
+                            self.panels.add_tile(session, tile);
+                        }
+                    }
+                }
+            }
         }
         // whatever was read for the object that was chosen before is no longer right
         self.panels.selection_changed();
@@ -554,6 +632,18 @@ impl Editor {
     /// What is chosen, and what was chosen - read through the session when there is one.
     fn selected(&self) -> Option<i64> {
         self.session.as_ref().and_then(|s| s.selected_id())
+    }
+
+    /// The heading the view faces, in the map's own degrees (0 is north, growing clockwise):
+    /// what an object dropped on the ground faces.
+    ///
+    /// The view's forward flattened onto the map, measured the way a turn measures a heading -
+    /// the direction from an object to the crosshair. So a thing placed faces away from where
+    /// it is being looked from, which is what a person laying a street out means by it.
+    fn heading_of_the_view(&self) -> f64 {
+        let Some(view) = self.view.as_ref() else { return 0.0 };
+        let f = flat(view.camera().forward().as_dvec3());
+        f.x.atan2(f.y).to_degrees()
     }
 
     // ---- the gizmo ---------------------------------------------------------------------
@@ -784,17 +874,25 @@ fn flat(v: DVec3) -> DVec3 {
 }
 
 /// The tool a key chooses, if it is one of them.
+///
+/// Which key is a tool's is the tool's own business (`Tool::key`), and this only says which
+/// letter a key prints - so that the rail's tip and the key that works cannot come apart.
 fn tool_key(code: KeyCode) -> Option<Tool> {
-    match code {
-        KeyCode::KeyV => Some(Tool::Select),
-        KeyCode::KeyM => Some(Tool::Move),
-        KeyCode::KeyR => Some(Tool::Turn),
-        KeyCode::KeyC => Some(Tool::Place),
-        KeyCode::KeyX => Some(Tool::Delete),
-        KeyCode::KeyG => Some(Tool::Raise),
-        KeyCode::KeyH => Some(Tool::Flatten),
-        _ => None,
-    }
+    letter(code).and_then(Tool::from_key)
+}
+
+/// The letter a key prints, or none for a key that prints something else. The letters in
+/// use today are V M R C X G H (`Tool::key`); the rest are here so that a tool whose key is
+/// moved to another letter needs no change here.
+fn letter(code: KeyCode) -> Option<char> {
+    use KeyCode::*;
+    Some(match code {
+        KeyA => 'A', KeyB => 'B', KeyC => 'C', KeyD => 'D', KeyE => 'E', KeyF => 'F', KeyG => 'G',
+        KeyH => 'H', KeyI => 'I', KeyJ => 'J', KeyK => 'K', KeyL => 'L', KeyM => 'M', KeyN => 'N',
+        KeyO => 'O', KeyP => 'P', KeyQ => 'Q', KeyR => 'R', KeyS => 'S', KeyT => 'T', KeyU => 'U',
+        KeyV => 'V', KeyW => 'W', KeyX => 'X', KeyY => 'Y', KeyZ => 'Z',
+        _ => return None,
+    })
 }
 
 /// The key as the widgets know it, for the ones they care about: a text field's caret, a
@@ -911,6 +1009,15 @@ impl ApplicationHandler for Editor {
                             return;
                         }
                         match code {
+                            // Escape gives up what the tool is holding before it gives up the
+                            // program: letting go of a `.sco` in the place tool is the one
+                            // thing there was to back out of
+                            KeyCode::Escape if self.session.as_ref().is_some_and(|s| s.armed_asset().is_some()) => {
+                                if let Some(session) = self.session.as_mut() {
+                                    session.arm_asset(None);
+                                }
+                                self.panels.say(host::ui::tr("Let it go: a click copies the selection again"));
+                            }
                             KeyCode::Escape => event_loop.exit(),
                             // F: the whole map at once, rather than the tiles around the
                             // camera - how a modder looks at a map's layout as a whole
@@ -1033,6 +1140,14 @@ impl ApplicationHandler for Editor {
                 self.make_a_map();
                 self.reopen();
                 self.back_to_the_maps();
+                // the outline asked for the view to go to what it chose. The panels cannot
+                // move a camera - the view is this window's - so it is done here, where the
+                // view is: the crosshair then rests on the object that was picked
+                if let Some(at) = self.panels.go_to.take() {
+                    if let Some(view) = self.view.as_mut() {
+                        view.hover_over(at, crate::ui::JUMP_HEIGHT);
+                    }
+                }
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }

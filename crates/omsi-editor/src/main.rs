@@ -29,6 +29,7 @@
 mod repl;
 mod gizmo;
 mod start;
+mod tiles;
 mod ui;
 mod view;
 mod window;
@@ -79,6 +80,8 @@ struct Args {
     content: Option<PathBuf>,
 
     /// Run the commands in this file and stop. Nothing is written unless the file says `save`.
+    /// With `--ui-shot` it is run before the frame is drawn instead, which is how a map is put
+    /// in a state and then looked at - and what the lines say is printed either way.
     #[arg(long, short = 's')]
     script: Option<PathBuf>,
 
@@ -103,12 +106,15 @@ struct Args {
 
     /// Draw one frame of the *interface* over the map into this PNG and stop - no window.
     /// The panels as the window draws them, so a change to them can be looked at without one.
+    /// It is the window's own frame, tile streaming and all, so a `--script` that changes the
+    /// map is drawn the way the window would draw it after the same clicks.
     #[arg(long, value_name = "png")]
     ui_shot: Option<PathBuf>,
 
     /// With `--ui-shot`: choose whatever the crosshair is on and put this tool in hand -
-    /// `select`, `move` or `turn`. What the marks a tool draws look like (the bubble round the
-    /// chosen object, the gizmo it is dragged by) can then be looked at without a window.
+    /// `select`, `move`, `turn`, `place`, `delete`, `raise` or `flatten` (`Tool::word`). What
+    /// the marks a tool draws look like (the bubble round the chosen object, the gizmo it is
+    /// dragged by) can then be looked at without a window.
     #[arg(long, value_name = "tool")]
     ui_tool: Option<String>,
 
@@ -117,6 +123,24 @@ struct Args {
     /// looked at without clicking through to it.
     #[arg(long, value_name = "section")]
     ui_section: Option<String>,
+
+    /// With `--ui-shot`: which page of the right-hand dock to draw - `inspector`, `outline`,
+    /// `assets`, `history` or `unsaved`. Five pages hang off one strip of tabs, and this is how
+    /// one of them is looked at without clicking through to it.
+    #[arg(long, value_name = "page")]
+    ui_dock: Option<String>,
+
+    /// With `--ui-shot --ui-dock outline`: draw the outline's other half - the map's tiles
+    /// rather than its objects.
+    #[arg(long)]
+    ui_tiles: bool,
+
+    /// With `--ui-shot`: hold this `.sco` (`Sceneryobjects\Berlin\House1.sco`) in the place
+    /// tool, as a click on the assets page would. What the tool, the assets page and the line
+    /// along the bottom say when something is being put down is then looked at without a
+    /// window.
+    #[arg(long, value_name = "sco")]
+    ui_arm: Option<String>,
 
     /// With `--ui-shot`: look at this point `x y` rather than at the map's first entry point.
     /// The crosshair can then be put over something on purpose, which is how what a click
@@ -131,9 +155,13 @@ struct Args {
     #[arg(long)]
     ui_hover: bool,
 
-    /// Look from this height above the ground for `--shot-at` (m).
-    #[arg(long, default_value_t = 80.0)]
-    height: f64,
+    /// How high above the ground the camera stands (m): for `--shot`, over the place it was
+    /// pointed at, and for `--ui-shot --ui-aim`, over the point aimed at. Each has its own
+    /// default - 80 m for a picture of the map, 40 m for one of the panels and the marks -
+    /// and this is how either is looked at from higher up, which is what a whole map's worth
+    /// of the tile grid needs.
+    #[arg(long, value_name = "m")]
+    height: Option<f64>,
 
     /// The hour of the day the map is lit by, 0-24 (default: the morning, 9).
     #[arg(long, default_value_t = 9.0)]
@@ -161,6 +189,14 @@ fn main() -> Result<()> {
         args.map = Some(made.global.to_string_lossy().into_owned());
     }
     let destination = resolve_destination(&args, &root);
+    // What a save writes has to be readable. Under `Destination::Content` the file a save
+    // writes is a *copy* under that folder, and it is the copy the game reads - so a reader
+    // that looked only at the map's own folder would be showing a map nobody will play. It
+    // goes last, after every other root, so that a folder named by `--content` can never
+    // shadow a file the installation or the game's own content folder has.
+    if let Destination::Content(dir) = &destination {
+        omsi_cfg::add_content_root(dir.clone());
+    }
     // A script and a window together are refused rather than quietly half-honoured: the one
     // reads commands from a file and stops, the other takes them from its own console, and
     // neither would notice the other had been left out.
@@ -191,7 +227,22 @@ fn main() -> Result<()> {
             Some(_) => Some(resolve_map(&root, args.map.as_deref(), ask)?),
             None => None,
         };
-        return ui_shot(&root, map.as_deref(), destination, args.ui_tool.as_deref(), args.ui_section.as_deref(), args.ui_aim.as_deref(), args.ui_hover, out);
+        let height = args.height.unwrap_or(AIM_HEIGHT);
+        return ui_shot(
+            &root,
+            map.as_deref(),
+            destination,
+            args.ui_tool.as_deref(),
+            args.ui_section.as_deref(),
+            args.ui_dock.as_deref(),
+            args.ui_tiles,
+            args.script.as_deref(),
+            args.ui_arm.as_deref(),
+            args.ui_aim.as_deref(),
+            height,
+            args.ui_hover,
+            out,
+        );
     }
 
     // which map: named, asked for here, or - when a window is going to open - asked for in
@@ -230,6 +281,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// How high a `--shot` looks from unless `--height` says otherwise (m), and how high
+/// `--ui-shot --ui-aim` does.
+const SHOT_HEIGHT: f64 = 80.0;
+const AIM_HEIGHT: f64 = 40.0;
+
 /// Draw the map around `x y` into a picture: the editor's own renderer, the game's own tiles.
 ///
 /// This is the editor's drawing with no window in front of it - the same `View`, the same
@@ -243,7 +299,7 @@ fn shot(root: &Path, map: &Path, x: f64, y: f64, args: &Args) -> Result<()> {
     // stand the given height above the ground *there*, so a map with hills is looked at from
     // a height over its own surface rather than over sea level
     let z = view.world().ground_terrain(x, y).unwrap_or(0.0);
-    view.look_at(glam::DVec3::new(x, y, z), args.height);
+    view.look_at(glam::DVec3::new(x, y, z), args.height.unwrap_or(SHOT_HEIGHT));
     view.stream(&renderer, &mut scene);
     renderer.prepare(&mut scene);
 
@@ -255,7 +311,7 @@ fn shot(root: &Path, map: &Path, x: f64, y: f64, args: &Args) -> Result<()> {
     println!(
         "{}: looked at ({x:.0}, {y:.0}) from {:.0} m, {:.0}:00, {} -> {}",
         view.world().global.name,
-        args.height,
+        args.height.unwrap_or(SHOT_HEIGHT),
         args.hour,
         view.note,
         args.shot.display()
@@ -275,7 +331,12 @@ fn ui_shot(
     destination: Destination,
     mark: Option<&str>,
     section: Option<&str>,
+    dock: Option<&str>,
+    tiles: bool,
+    script: Option<&Path>,
+    arm: Option<&str>,
     aim: Option<&[f64]>,
+    height: f64,
     hover: bool,
     out: &Path,
 ) -> Result<()> {
@@ -283,8 +344,22 @@ fn ui_shot(
     let mut instance = openomsi_game::host::instance();
     let mut renderer = openomsi_game::host::renderer(&mut instance, None, root)?;
     let mut panels = ui::Panels::new();
+    // the tile grid, kept between the frames a shot is drawn at the same way the window keeps
+    // it - a pool of instances is built once and never rebuilt
+    let mut grid = tiles::Overlay::default();
     let (w, h) = (1600u32, 900u32);
     let dt = 1.0 / 60.0;
+
+    // which page of the right-hand dock (the inspector's own is what it opens on)
+    if let Some(name) = dock {
+        match ui::Dock::named(name) {
+            Some(d) => panels.show_dock(d),
+            None => bail!("--ui-dock {name}: expected inspector, outline, assets, history or unsaved"),
+        }
+    }
+    if tiles {
+        panels.show_tiles();
+    }
 
     // what the window would be showing: a map, or the page that asks which one
     let mut session = match map {
@@ -295,14 +370,15 @@ fn ui_shot(
         Some(_) => {
             let mut scene = renderer.new_scene();
             let mut view = view::View::open(root, map.expect("a map was opened"), &renderer, &mut scene)?;
-            // `--ui-aim`: stand over a place of the caller's choosing and look down at it,
+            // `--ui-aim`: stand over a place of the caller's choosing (`--height` above it)
+            // and look down at it,
             // rather than at the map's first entry point - so the crosshair can be put over
             // something on purpose, which is how what a click picks is looked at without a
             // window
             if let Some(at) = aim.filter(|a| a.len() >= 2) {
                 let (x, y) = (at[0], at[1]);
                 let z = view.world().ground_terrain(x, y).unwrap_or(0.0);
-                view.hover_over(glam::DVec3::new(x, y, z), 40.0);
+                view.hover_over(glam::DVec3::new(x, y, z), height);
                 // and the tiles of the new place: the view was opened around the map's entry
                 // point, and looking somewhere else means tiles that are not loaded yet - and
                 // an object that is not loaded is an object nothing can be picked on
@@ -327,24 +403,47 @@ fn ui_shot(
     }
     // what the window would tell them: the panels decide the layout, the caller the size
     let frame = match (&mut session, opened) {
-        (Some(session), Some((mut scene, view))) => {
+        (Some(session), Some((mut scene, mut view))) => {
+            // `--script`: console lines, run against the session before the frame is drawn -
+            // the cheap way to put a map in a state and then look at it. The command set is the
+            // window's own console's, and what each line says is printed, because a refusal
+            // that only reached a panel would not be in this output at all.
+            if let Some(path) = script {
+                let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+                println!("-- {}", path.display());
+                run_lines(session, text.lines().map(|l| l.to_string()), true)?;
+                // and then what the window's own frame does when a panel has changed the map:
+                // hand the tile list to the world, and let the streaming of the area below
+                // fetch whatever it names - so a tile the script added is on the ground in the
+                // picture, and a tile it took out is not
+                view.adopt_tiles(session);
+                if view.stream(&renderer, &mut scene).tiles > 0 {
+                    renderer.prepare(&mut scene);
+                }
+            }
             // a tool with something chosen: what the marks look like - the bubble and the
             // gizmo - needs an object, and the crosshair's own is the one the window would
             // have chosen from where it stands
             if let Some(name) = mark {
+                // a word that is not a tool is refused, not quietly turned into the chooser:
+                // `--ui-tool raise` used to draw the select tool and say nothing
+                let Some(tool) = ui::Tool::named(name) else {
+                    bail!("--ui-tool {name}: expected one of {}", ui::Tool::words().collect::<Vec<_>>().join(", "));
+                };
                 let id = openomsi_game::host::pick(view.world(), &scene, view.camera().position, view.camera().forward());
                 session.select(id);
-                panels.tool = match name {
-                    "move" => ui::Tool::Move,
-                    "turn" => ui::Tool::Turn,
-                    "place" => ui::Tool::Place,
-                    "delete" => ui::Tool::Delete,
-                    _ => ui::Tool::Select,
-                };
+                panels.tool = tool;
                 println!("{name}: object {id:?} chosen");
             }
+            // a `.sco` in the place tool: the tool goes to hand with it, as a click on the
+            // assets page leaves the two
+            if let Some(sco) = arm {
+                session.arm_asset(Some(sco.to_string()));
+                panels.tool = ui::Tool::Place;
+                println!("{sco}: in the place tool");
+            }
             let info = ui::Info { fps: 60.0, loaded_tiles: view.loaded_count(), aim: view.aim(), holding: None };
-            let frame = panels.build(session, &view, &info, &renderer, (w, h), 1.0, dt);
+            let frame = panels_every_pass(&mut panels, session, &view, &info, &mut renderer, (w, h), dt);
             // the marks, drawn on the map as the window draws them - before the frame that
             // draws the map, which is where the window does it
             let shown = view::Shown::default();
@@ -359,6 +458,14 @@ fn ui_shot(
             let chosen = session.selected_id().filter(|_| !hover);
             let under = hover.then(|| session.selected_id()).flatten();
             crate::window::mark_outline(&mut scene, view.world(), &shown, under, chosen, panels.tool);
+            // the tile grid as the window draws it, so that what the tile tool rings - the
+            // map's own tiles, the ring it could grow into, the one the middle of the view is
+            // on - can be looked at without a window. The level and not the ground, as the
+            // window has it: the ring has no ground under it (`View::aim_on_the_tiles`).
+            if panels.tool == ui::Tool::Tiles {
+                let at = view.aim_on_the_tiles((0.0, 0.0), 1.0);
+                grid.draw(&renderer, &mut scene, session, at, view.camera().position);
+            }
             // the map goes under the panels, in the same target, before they are drawn over it
             let target = renderer.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("editor ui shot"),
@@ -412,6 +519,36 @@ fn ui_shot(
         renderer.queue.submit([enc.finish()]);
     }
     compose(&mut panels, &frame, &renderer, &target, &tv, (w, h), out)
+}
+
+/// The panels, laid out as many times as it takes for the asynchronous corners of them to
+/// arrive: a shot is one frame and nothing else would wait.
+///
+/// The asset preview is what needs it. A `.sco` is read on the showroom's own thread, and the
+/// picture is a texture the toolkit is handed at the end of a frame and draws from the next -
+/// so the frame that arms an asset can only ever say "Loading…", and a shot of one frame would
+/// say it for ever. The passes are cheap (a layout and a small offscreen render each) and the
+/// last one is the frame that is kept.
+fn panels_every_pass(
+    panels: &mut ui::Panels,
+    session: &mut Session,
+    view: &view::View,
+    info: &ui::Info,
+    renderer: &mut omsi_render::Renderer,
+    size: (u32, u32),
+    dt: f32,
+) -> ui::Frame {
+    const PASSES: usize = 8;
+    // (a shot is drawn at one pixel a point: the 1600x900 it is composed at is logical too)
+    const SCALE: f32 = 1.0;
+    let mut frame = None;
+    for pass in 0..PASSES {
+        frame = Some(panels.build(session, view, info, renderer, size, SCALE, dt));
+        if pass + 1 < PASSES {
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+    }
+    frame.expect("at least one pass")
 }
 
 /// Draw the panels over what is already in `target` and write the result to `out`.

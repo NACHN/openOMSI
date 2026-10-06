@@ -8,6 +8,22 @@
 //! lowered, flattened); a tile's ground is written as its `.map.terrain` copy. Splines are
 //! not part of it (the timetable is the launcher's Timetable page).
 //!
+//! # Frozen
+//!
+//! No feature is added here again. `openomsi-editor` - a program of its own, with a rail, a
+//! dock, an undo stack and (in time) a plan view - is where map editing goes, and this was
+//! the first attempt at it. Keep it working and keep fixing it when it breaks; it is what
+//! `Ctrl+Shift+E` does today and what USER_GUIDE.md documents. But a capability added to the
+//! standalone editor is **not** to be mirrored here, and the two front ends' middle layers
+//! (this file's `Added`, its change list and its save loop, against `omsi-editor-core`'s
+//! `Document`, `Session` and `NewObject`) are not to be merged: the plan is that this one
+//! goes away once the standalone one can do everything it can. See `docs/EDITOR.md`, stage 0.
+//!
+//! Its one capability the standalone editor cannot match is editing against a world that is
+//! being simulated - a bus at a stop, traffic, people - because the standalone one opens the
+//! map without them. If that is wanted later it is an argument for a play-and-edit mode in
+//! the standalone editor, not for keeping this file.
+//!
 //! Keys while it is on (Ctrl+Shift+E, or the game menu):
 //! Enter picks the object nearest the middle of the view, Tab the next nearest;
 //! I / K / J / L move it forward, back, left and right as the camera faces, U / O down and

@@ -48,6 +48,44 @@ pub struct NewRecord {
     pub template_lines: Vec<String>,
 }
 
+/// How many lines [`blank_object_record`] writes - a record with no labels.
+const RECORD_LINES: usize = 11;
+
+/// The lines a brand-new `[object]` record is made of: an object placed from a file in the
+/// content folder, which no map holds yet and which therefore has no template to be copied
+/// from.
+///
+/// The shape is the one [`object_records`] reads back and [`rewrite_record`] writes in -
+/// keyword, detail level, file, id, x, y, z, heading, and then the two angles and the label
+/// count a version 12 and later tile carries. Every number is already final: a record made
+/// from these lines is placed exactly where they say, which is why the deltas of a copy
+/// ([`NewRecord::moved`], [`NewRecord::turned`]) are left at zero for one.
+///
+/// `at` is *tile-local* and z is a height **over the ground**, because that is the space a
+/// tile file writes an object in - pass `0` for z and the object stands on the terrain, which
+/// is where a newly placed object goes.
+///
+/// Empty labels (a count of `0`) and not a name: what an object is called is the map maker's
+/// to say, and a name invented here would be text nobody typed.
+pub fn blank_object_record(sco: &str, id: i64, at: DVec3, heading: f64) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(RECORD_LINES);
+    out.push("[object]\r\n".to_string());
+    // the detail level a version 9 and later tile writes
+    out.push("0\r\n".to_string());
+    // (the file as a record writes it, whatever separators it arrived with)
+    out.push(format!("{}\r\n", sco.replace('/', "\\")));
+    out.push(format!("{id}\r\n"));
+    out.push(format!("{}\r\n", num(at.x)));
+    out.push(format!("{}\r\n", num(at.y)));
+    out.push(format!("{}\r\n", num(at.z)));
+    out.push(format!("{}\r\n", num(heading)));
+    // pitch, bank, and the count of the object's labels
+    out.push("0\r\n".to_string());
+    out.push("0\r\n".to_string());
+    out.push("0\r\n".to_string());
+    out
+}
+
 /// The tile file with `copies` added, each record after its template's - or at the end for a
 /// template that is not in the file. Returns the text and how many were added.
 pub fn add_copies(text: &str, copies: &[NewRecord]) -> (String, usize) {
@@ -94,18 +132,34 @@ pub fn add_copies(text: &str, copies: &[NewRecord]) -> (String, usize) {
         }
     }
     // a copy whose template this save takes away has no record to follow: it goes at the end,
-    // rather than being dropped without a word
+    // rather than being dropped without a word. An object placed from a file rather than
+    // copied is always one of these - it has no template at all, so the end is its place.
     for c in copies.iter().filter(|c| !placed.contains(&c.id)) {
+        let eol = c.template_lines.first().map(|l| ending(l)).unwrap_or("\n").to_string();
         if !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
         }
+        // (a blank line between records, as the editor writes them - the end of the file is
+        // no different from the middle of it, and a record written straight after another is
+        // the one thing a person reading the file would call wrong)
+        if !out.is_empty() && !ends_with_blank_line(&out) {
+            out.push_str(&eol);
+        }
         out.push_str(&rewrite_record(c));
         if !c.template_lines.last().map(|l| body(l).trim().is_empty()).unwrap_or(false) {
-            out.push_str(&c.template_lines.first().map(|l| ending(l)).unwrap_or("\n").to_string());
+            out.push_str(&eol);
         }
         added += 1;
     }
     (out, added)
+}
+
+/// Whether `text` ends with a blank line - what OMSI's own editor leaves between two records.
+fn ends_with_blank_line(text: &str) -> bool {
+    match text.split_inclusive('\n').next_back() {
+        Some(last) => body(last).trim().is_empty(),
+        None => true,
+    }
 }
 
 /// The copy's record: the template's own lines with its file, its id and its place changed.
@@ -319,6 +373,47 @@ mod tests {
         let (out, n) = add_copies(TWO, &[c]);
         assert_eq!(n, 0);
         assert_eq!(out, TWO);
+    }
+
+    /// What `Session::place_asset` hands to `add_copies`: an object out of the content folder,
+    /// whose record is written from nothing and which has no template in the file to follow.
+    #[test]
+    fn a_record_written_from_nothing_goes_at_the_end_after_a_blank_line() {
+        let fresh = NewRecord {
+            template: 42,
+            id: 42,
+            file: "thing.sco".into(),
+            moved: DVec3::ZERO,
+            turned: 0.0,
+            template_lines: blank_object_record("Sceneryobjects\\New\\thing.sco", 42, DVec3::new(3.0, 4.0, 0.0), 15.0),
+        };
+        let (out, n) = add_copies(TWO, &[fresh]);
+        assert_eq!(n, 1);
+        // the record says where the object stands, and stands where it says
+        assert!(
+            out.contains("[object]\r\n0\r\nSceneryobjects\\New\\thing.sco\r\n42\r\n3\r\n4\r\n0\r\n15\r\n0\r\n0\r\n0\r\n"),
+            "{out:?}"
+        );
+        // a blank line between it and the record before it, as between every two records
+        assert!(out.contains("0\r\n\r\n[object]\r\n0\r\nSceneryobjects\\New\\thing.sco"), "{out:?}");
+        // and nothing that was in the file moved or changed
+        assert!(out.starts_with(TWO), "{out:?}");
+    }
+
+    /// The lines of a record, as the file will read them back.
+    #[test]
+    fn a_blank_record_reads_back_as_the_object_it_was_written_for() {
+        let lines = blank_object_record("Sceneryobjects\\New\\thing.sco", 7, DVec3::new(1.25, -3.0, 0.0), 270.0);
+        let text: String = lines.concat();
+        let got = object_records(&text);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, 7);
+        assert_eq!(got[0].file, "Sceneryobjects\\New\\thing.sco");
+        assert_eq!(got[0].pos, DVec3::new(1.25, -3.0, 0.0));
+        assert_eq!(got[0].heading, 270.0);
+        // a forward slash is written the way a tile file writes a path
+        let lines = blank_object_record("Sceneryobjects/New/thing.sco", 7, DVec3::ZERO, 0.0);
+        assert_eq!(lines[2], "Sceneryobjects\\New\\thing.sco\r\n");
     }
 
     #[test]
