@@ -65,10 +65,11 @@ fn src(uv: vec2<f32>, texel: vec2<f32>, x: f32, y: f32) -> vec3<f32> {
 }
 
 // The picture without the bus's own screens (the screen mask is the first glow level's
-// t_base): a lit display glows no halo over its own letters. An LED panel's dots are the
-// panel's own light, though - they stay in the source (the mask's g) and count for several
-// times their colour there (`p.c.w`), so that the faint mix the glow is blooms a halo
-// around the panel without the dots themselves having to burn.
+// t_base): a lit display glows no halo over its own letters. An LED panel's dots, and a
+// `[matl_glow]` material, are their own light, though - they stay in the source (the mask's
+// g) and count for several times their colour there (`p.c.w`), so that the faint mix the
+// glow is blooms a halo around them without the panels or the materials having to burn
+// themselves.
 //
 // What glows is only the light above the display's white (`GLARE_WHITE`, in the picture's
 // pre-exposed terms): the viewer's own eye scatters the light of everything the screen can
@@ -77,15 +78,33 @@ fn src(uv: vec2<f32>, texel: vec2<f32>, x: f32, y: f32) -> vec3<f32> {
 // images", 1995). The alpha carries the picture's whole luminance down the chain for the
 // metering.
 const GLARE_WHITE: f32 = 1.0;
+/// The weight a `[matl_glow]` material's strength reads as, in `g`'s 0.5..0.95 (see
+/// `enhanced.wgsl`; spelled out the same there). In the same terms `Led glow`'s own weight
+/// is (`Lighting::led_glow * 10`, 15 at that slider's default).
+const GLOW_WEIGHT_MAX: f32 = 64.0;
 fn src_unmasked(uv: vec2<f32>, texel: vec2<f32>, x: f32, y: f32) -> vec4<f32> {
     let at = uv + vec2<f32>(x, y) * texel;
     let m = textureSampleLevel(t_base, s_lin, at, 0.0);
     let c = clean(textureSampleLevel(t_src, s_lin, at, 0.0).rgb);
     let screen = step(0.5, m.r);
-    let led = step(0.5, m.g);
-    let picture = c * (1.0 - screen);
-    let over = min(max(picture - vec3<f32>(GLARE_WHITE), vec3<f32>(0.0)), vec3<f32>(64.0)) + c * (led * p.c.w) * screen;
-    return vec4<f32>(over, luma(picture + c * (led * p.c.w) * screen));
+    // (the mask's g: an LED panel's dots, or a `[matl_glow]` material's own weight in its
+    // 0.5..0.95 - what is its own light. The b is water's puddle weight, see `enhanced.wgsl`)
+    let lit = step(0.5, m.g);
+    // A `[matl_glow]` material is its own light with a weight of its own, carried in `g`'s
+    // 0.5..0.95; g = 1 is an LED panel's own dots, whose weight is the `Led glow` setting's
+    // (`p.c.w`) - a slot that declares the keyword carries its own there instead, whether it
+    // is an LED panel or not. So that slider never scales what a mod declared. (The weight
+    // only shows where the source is wide enough for the first level below to keep it, see
+    // `fs_down_first`: the glow is the halo of what is wide and bright.)
+    let own = step(m.g, 0.96) * clamp((m.g - 0.5) / 0.45, 0.0, 1.0) * GLOW_WEIGHT_MAX;
+    let mine = step(0.01, own);
+    let w = select(p.c.w, own, mine > 0.5);
+    // (a `[matl_glow]` pixel is not counted by the "above the screen's white" rule below -
+    // its own weight already says how much of it blooms)
+    let picture = c * (1.0 - screen) * (1.0 - mine);
+    let glow = c * (lit * w) * screen + c * w * mine * (1.0 - screen);
+    let over = min(max(picture - vec3<f32>(GLARE_WHITE), vec3<f32>(0.0)), vec3<f32>(64.0)) + glow;
+    return vec4<f32>(over, luma(picture + glow));
 }
 
 fn src4(uv: vec2<f32>, texel: vec2<f32>, x: f32, y: f32) -> vec4<f32> {
