@@ -7672,7 +7672,13 @@ impl World {
                                                 &Image { width: w, height: h, rgba: [0, 0, 0, 255].repeat((w * h) as usize), has_alpha: true },
                                                 false,
                                             );
-                                            let mat = renderer.add_material(scene, Some(tex), text_alpha(o3d_mats, slot, overrides), [1.0; 4], true);
+                                            // `lit` on the page's slot (see `Look::lit`) makes
+                                            // it a surface: shaded like every other material -
+                                            // the sun, the street's lamps, the fog, the eye's
+                                            // own metering - so a sign face dims with the night
+                                            // it stands in. Left out, the page is a display,
+                                            // drawn at its own brightness: an outdoor screen.
+                                            let mat = renderer.add_material(scene, Some(tex), text_alpha(o3d_mats, slot, overrides), [1.0; 4], !o.lit);
                                             let mat = gpu.material(renderer, scene, mat);
                                             tg.textures.push(tex);
                                             tg.materials.push(mat);
@@ -11154,6 +11160,10 @@ pub struct DynSlot {
     /// script texture is drawn unlit and keeps its own colours.
     pub color: [f32; 4],
     pub emissive: [f32; 3],
+    /// `[useScriptTexture] <n> lit` / `[useHtmlTexture] <n> lit` on the slot: its picture is a
+    /// surface - shaded by the world's light - rather than the display such a slot is by
+    /// default (see `Look::lit`; the per-frame material is made here, not in `for_vehicle`).
+    pub lit: bool,
 }
 
 /// Whether a `[matl_change]` variable at `x` shows the slot's `[matl_item]`: Omsi.exe
@@ -11354,6 +11364,11 @@ pub struct Look {
     color: [f32; 4],
     emissive: [f32; 3],
     unlit: bool,
+    /// `[useScriptTexture] <n> lit` / `[useHtmlTexture] <n> lit`: this slot's picture comes
+    /// from a script or a page and is a **surface** - shaded by the world's light like every
+    /// other material - rather than the display such a slot is by default (see
+    /// `MaterialDef::lit`). Read in `for_vehicle`, and by the scenery page's own material.
+    lit: bool,
     /// A picture of the vehicle's own in place of the diffuse texture (see `DynTex`).
     diffuse: Option<TextureId>,
     transmap: Option<(TextureId, bool)>,
@@ -11445,7 +11460,9 @@ impl Look {
         if d.script.is_some() {
             l.color = [1.0; 4];
             l.emissive = [0.0; 3];
-            l.unlit = true;
+            // (a slot that declares itself lit is a surface: `[useScriptTexture] 0 lit`, see
+            // `Look::lit`. A display's picture is its own light, so it is drawn unlit.)
+            l.unlit = !l.lit;
         }
         l
     }
@@ -12466,9 +12483,10 @@ impl World {
                     (d.color, d.emissive)
                 };
                 renderer.address_next.set(d.address);
-                // a script's screen (matrix displays, the IBIS's picture, LCDs) likewise
+                // a script's screen (matrix displays, the IBIS's picture, LCDs) likewise -
+                // unless the slot declares itself a surface (`lit`, see `DynSlot::lit`)
                 let mut extra = d.extra;
-                extra.screen = d.script.is_some() || d.script_trans.is_some();
+                extra.screen = (d.script.is_some() || d.script_trans.is_some()) && !d.lit;
                 // ... and a `\S:n` mask makes it an LED panel: its lit dots are its own
                 // light, which the enhanced picture blooms (see `MaterialExtra::led`)
                 extra.led = d.script_trans.is_some() && d.extra.led;
@@ -12477,7 +12495,8 @@ impl World {
                     tex,
                     alpha,
                     color,
-                    d.script.is_some(),
+                    // (a `lit` slot is a surface: shaded by the world's light, see `DynSlot::lit`)
+                    d.script.is_some() && !d.lit,
                     transmap,
                     d.night,
                     d.lightmap,
@@ -12891,7 +12910,11 @@ impl World {
                     // `[matl_item]` variant keeps its materials here, not in `dyn_slots`:
                     // without the flags on this `extra` the K++ and Krueger panels showed
                     // their dots but never glowed.
-                    extra.screen = script_slot.is_some() || script_trans.is_some();
+                    // `[useScriptTexture] <n> lit` / `[useHtmlTexture] <n> lit` on the slot:
+                    // its picture is a surface, so it is not the bus's own screen either (the
+                    // glow's and FXAA's business) and not drawn unlit (see `Look::lit`)
+                    let lit = ov.iter().any(|o| o.lit);
+                    extra.screen = (script_slot.is_some() || script_trans.is_some()) && !lit;
                     extra.led = script_trans.is_some() && lm_white(&ov);
                     if dirt_overlay {
                         extra.no_z_write = true;
@@ -12982,13 +13005,16 @@ impl World {
                         // busbar switches to - was opaque, its `\S:n` mask cut nothing, and the
                         // whole matrix was lit.)
                         let it_alpha = if repair_body_depth { AlphaMode::Opaque } else { ov_item.iter().find(|o| o.alpha_set).map(|o| alpha_mode(o.alpha)).unwrap_or(alpha) };
+                        // (an item is a variant of the same slot: the slot's own `lit`, or one
+                        // of its own - see `Look::lit`)
+                        let it_lit = lit || ov_item.iter().any(|o| o.lit);
                         let (it_color, it_emissive, it_specular, it_ambient) = d3d_material(m, ov_item.iter().find_map(|o| o.allcolor).or(ov.iter().find_map(|o| o.allcolor)), textured);
                         let mut it_extra = material_extra(&ov_item, env_mask, bump, it_specular);
                         it_extra.ambient = Some(it_ambient);
                         // (an item without a night map of its own keeps the plain one, lit
                         // the same way)
                         it_extra.night_switched = it_night.is_some();
-                        it_extra.screen = script_item.is_some() || it_script_trans.is_some();
+                        it_extra.screen = (script_item.is_some() || it_script_trans.is_some()) && !it_lit;
                         // (the item's `\S:n`, or the one it inherits from its base, keeps it
                         // an LED panel: see `MaterialExtra::led`)
                         it_extra.led = it_script_trans.is_some() && if ov_item.iter().any(|o| o.lightmap.is_some()) { lm_white(ov_item) } else { lm_white(&ov) };
@@ -12999,7 +13025,7 @@ impl World {
                             it_extra.no_z_check = false;
                         }
                         let it_dyn = DynTex { text: text_item, script: script_item, script_trans: it_script_trans, address };
-                        Look { alpha: it_alpha, color: it_color, emissive: it_emissive, unlit: false, diffuse: None, transmap: it_trans, night: it_night, lightmap: it_light, envmap, extra: it_extra, dyn_tex: it_dyn }
+                        Look { alpha: it_alpha, color: it_color, emissive: it_emissive, unlit: false, lit: it_lit, diffuse: None, transmap: it_trans, night: it_night, lightmap: it_light, envmap, extra: it_extra, dyn_tex: it_dyn }
                     };
                     let first_item: Vec<&MaterialDef> = ov_item.iter().copied().filter(|o| !later_items.iter().any(|l| std::ptr::eq(*l, *o))).collect();
                     let item_spec = (change_var.is_some() && !ov_item.is_empty()).then(|| item_look(&first_item));
@@ -13012,7 +13038,7 @@ impl World {
                     // [matl_noZwrite]: glass, the rain film and the dirt layer are blended
                     // and must not write depth, or everything blended behind them is thrown
                     // away and the window turns into a pale hole in the world
-                    let spec = SlotSpec { base: Look { alpha, color, emissive, unlit, diffuse: None, transmap, night, lightmap, envmap, extra, dyn_tex: base_dyn }, item: item_spec, more: more_items };
+                    let spec = SlotSpec { base: Look { alpha, color, emissive, unlit, lit, diffuse: None, transmap, night, lightmap, envmap, extra, dyn_tex: base_dyn }, item: item_spec, more: more_items };
                     // [texchanges]: the texture named in the mesh is only a key - the master
                     // of that name holds the textures a script variable switches between
                     // (the SD200's roller blinds, the seat covers of the AI interior).
@@ -13080,7 +13106,7 @@ impl World {
                     } else if let Some(lights) = multi_light(base, item) {
                         variants.push(VariantSlot { mesh: instances.len(), slot, base, item, more: Vec::new(), var: String::new(), more_vars: Vec::new(), entries, tex_var: String::new(), free: Vec::new(), spec, base_tex, entry_tex, lights: Some(lights) });
                     } else if base_dyn.any() {
-                        dyn_slots.push(DynSlot { mesh: instances.len(), slot, text: text_slot, script: script_slot, script_trans, tex, alpha, transmap, night, lightmap, envmap, address, extra, color, emissive });
+                        dyn_slots.push(DynSlot { mesh: instances.len(), slot, text: text_slot, script: script_slot, script_trans, tex, alpha, transmap, night, lightmap, envmap, address, extra, color, emissive, lit });
                     }
                     base
                 })
@@ -13593,6 +13619,7 @@ mod tests {
             color: [1.0; 4],
             emissive: [0.0; 3],
             unlit: false,
+            lit: false,
             diffuse: None,
             transmap: None,
             night: None,

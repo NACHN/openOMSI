@@ -313,6 +313,25 @@ A scenery object (`.sco`) can show pages too: `[htmltexture]` in its model confi
 `[useHtmlTexture]` on the material, the same as in a vehicle. The page is looked up in the
 model folder, then in the folder of the `.sco`.
 
+A page is a **display** by default: drawn at its own brightness, which is what a bus's own
+panel is. A page that is a **surface** - a road sign, a poster, a notice board - wants the
+world's light instead, so put `lit` on the line after the page's index:
+
+```
+[matl]
+sign.dds
+0
+
+[useHtmlTexture]
+0
+lit
+```
+
+With it the slot is shaded like every other material - the sun, the street's lamps, the fog,
+the eye's own adaptation - so a sign face dims with the night it stands in, and it is no
+longer the bus's own screen either (its bright pixels glow as a surface's do). The same word
+goes after a `[useScriptTexture] <n>`.
+
 A scenery page only gets the basic API: `omsi.setVar`, `omsi.trigger`, `omsi.getVar`,
 `omsi.vars`, `omsi.time`, `omsi.date` and `omsi.locale`. `omsi.vehicle`, `omsi.depot` and
 `setRoute`, `setLine`, `setDestination`, `clearLine` and `setNextStop` do not exist there (`d.vehicle` in `update`

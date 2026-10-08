@@ -81,6 +81,12 @@ pub struct MaterialDef {
     pub texcoord_trans_y: Option<String>,
     pub use_script_texture: Option<i32>,
     pub use_text_texture: Option<i32>,
+    /// `[useScriptTexture] <n> lit` / `[useHtmlTexture] <n> lit` (the word on the line after
+    /// the index): the slot's picture comes from a script or a page and is a **surface**, not
+    /// a display - it is shaded by the world's light as every other material is. Without it
+    /// such a slot is drawn unlit, at its own brightness, which is what a bus's own panel is.
+    /// An openOMSI extension: Omsi.exe knows neither part, and draws the slot unlit.
+    pub lit: bool,
     pub alphascale: Option<String>,
     pub freetex: Option<(String, String)>,
     pub lightmap: Option<(String, String)>,
@@ -102,6 +108,7 @@ impl MaterialDef {
         }
         self.no_z_write |= base.no_z_write;
         self.no_z_check |= base.no_z_check;
+        self.lit |= base.lit;
         if self.z_bias == 0 {
             self.z_bias = base.z_bias;
         }
@@ -529,6 +536,19 @@ impl Model {
         self.meshes.last_mut().and_then(|m| m.materials.last_mut())
     }
 
+    /// `lit`, the word after a `[useScriptTexture]`/`[useHtmlTexture]` index (see
+    /// `MaterialDef::lit`): taken when it is there, and only that word - a next line holding
+    /// anything else (a blank, another keyword) leaves the reader where it was.
+    fn take_lit_flag(r: &mut CfgReader) -> bool {
+        let mut ahead = r.clone();
+        if ahead.word().eq_ignore_ascii_case("lit") {
+            *r = ahead;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Handle one model.cfg keyword. Returns `false` when the keyword is not part of the
     /// model vocabulary (so the caller can try its own).
     pub fn handle_keyword(&mut self, k: &str, r: &mut CfgReader) -> bool {
@@ -897,18 +917,22 @@ impl Model {
             }
             "usescripttexture" => {
                 let v = r.i32();
+                let lit = Self::take_lit_flag(r);
                 if let Some(m) = self.cur_matl() {
                     m.use_script_texture = Some(v);
+                    m.lit = lit;
                 }
             }
             "usehtmltexture" => {
                 let v = r.i32();
+                let lit = Self::take_lit_flag(r);
                 let index = usize::try_from(v)
                     .ok()
                     .and_then(|n| self.html_textures.get(n))
                     .map(|d| d.script_index as i32);
                 if let (Some(m), Some(i)) = (self.cur_matl(), index) {
                     m.use_script_texture = Some(i);
+                    m.lit = lit;
                 }
             }
             "usetexttexture" => {
@@ -1170,6 +1194,27 @@ mod tests {
         let a = mats.iter().find(|d| d.texture == "Absperr_gr.dds").unwrap();
         assert_eq!(a.alpha, 1);
         assert!(a.envmap.is_some());
+    }
+
+    /// `lit` after a script or page index: the slot is a surface rather than a display, and a
+    /// keyword after it is still read as a keyword.
+    #[test]
+    fn a_script_texture_can_be_declared_lit() {
+        let text = "[scripttexture]\n64\n32\n\n[htmltexture]\n800\n480\nhtml\\demo.html\n\n[mesh]\nx.o3d\n\n[matl]\nx.dds\n0\n[useHtmlTexture]\n0\nlit\n";
+        let m = Model::parse(&omsi_cfg::CfgFile::from_str("model.cfg", text));
+        let d = &m.meshes[0].materials[0];
+        assert_eq!(d.use_script_texture, Some(1), "the page took script texture 1");
+        assert!(d.lit, "the word after the index");
+        let text = "[scripttexture]\n64\n32\n\n[mesh]\nx.o3d\n\n[matl]\nx.dds\n0\n[useScriptTexture]\n0\n[matl_alpha]\n2\n";
+        let m = Model::parse(&omsi_cfg::CfgFile::from_str("model.cfg", text));
+        let d = &m.meshes[0].materials[0];
+        assert_eq!(d.use_script_texture, Some(0));
+        assert!(!d.lit, "without the word it stays a display");
+        assert_eq!(d.alpha, 2, "the keyword after the index is read as one");
+        let text = "[scripttexture]\n8\n8\n\n[mesh]\nx.o3d\n\n[matl]\nx.dds\n0\n[useScriptTexture]\n0\nlit\n[matl_lightmap]\nl.bmp\n1\n";
+        let m = Model::parse(&omsi_cfg::CfgFile::from_str("model.cfg", text));
+        let d = &m.meshes[0].materials[0];
+        assert!(d.lit && d.lightmap.is_some(), "{d:?}");
     }
 
     /// A mesh before the first [LOD] belongs to that level (the WH UK AI cars' shadow).

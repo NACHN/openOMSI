@@ -811,7 +811,12 @@ Regional = https://example.org/regional.mp3 | 97.9
 ## Script textures and the IBIS callbacks
 
 `[scripttexture] w h` (model.cfg) declares an RGBA image per index; `[useScriptTexture] n`
-puts it on a material, `[matl_transmap] \S:n` uses its alpha as transparency map. The
+puts it on a material, `[matl_transmap] \S:n` uses its alpha as transparency map. `lit` on
+the line after the index (index next, then the word) makes that slot a **surface** - shaded
+by the world's light like every other material - where such a slot is drawn unlit, at its own
+brightness, by default: a bus's own panel is a display and a page or a script texture on a
+scenery object is often a road sign, a poster or a notice board. An openOMSI extension;
+Omsi.exe draws the slot unlit either way. The
 scripts draw with `(M.V.ST…)` callbacks, arguments pushed in order (index first):
 `STNewTex(i)`, `STLock(i)`, `STUnlock(i)` (upload), `STFilter(i)`, `STSetColor(i, a, r, g, b)`,
 `STDrawPixel(i, x, y)`, `STDrawRect(i, x1, y1, x2, y2)`, `STTextOut(i, x, y, font, mode,
