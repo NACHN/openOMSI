@@ -286,7 +286,13 @@ dots a couple of pixels across where the full chain has run them together; 4 is 
 calm of the full chain). The bus's own screens in Enhanced (the IBIS, ticket and
 html terminals, the dashboard's LCDs) dim at night as a real dashboard's do, and are never
 lifted over their own colour by the eye's adaptation to the dark cab; the gauges' backlight
-and the destination LED matrices (`led_glow`) are left as they are. `mouse_sens` (mouse steering,
+and the destination LED matrices (`led_glow`) are left as they are. A mod can also declare a
+material its own light outright - `[matl_glow] <texture> <value>` (openOMSI's own keyword, see
+docs/FORMATS.md): the texture is a greyscale mask of where it shines (the light is the
+material's own colour) and `value` is in this slider's own levels, so `6` is the default and
+`20` is brighter than the top (a flash). That number is the slot's own weight in the glow's
+source as well, so `Led glow` never scales it: the slider at 0 leaves a `[matl_glow]` lit where
+an LED panel's dots go dark. `mouse_sens` (mouse steering,
 1 = OMSI's), `mouse_smooth` (0: the mouse's wheel follows the cursor without easing),
 `ui_scale` (the size of the game's interface over the picture - its texts,
 the menu, the timetable, the navigator and the city map - from 0.5 to 2, 1 by default, on

@@ -345,7 +345,8 @@ fn perturb_normal(n: vec3<f32>, p: vec3<f32>, uv: vec2<f32>, tn: vec3<f32>) -> v
 
 // The enhanced pass's two targets: the picture, and the screen mask (r: 1 on the bus's own
 // screens, carried by the coverage of what is drawn over them; g: 1 on an LED panel's own
-// dots, see MASK_FORMAT; b is the reflected-light weight of wet puddles).
+// dots, see MASK_FORMAT, and a `[matl_glow]` material's own halo weight in its 0.5..0.95;
+// b is the reflected-light weight of wet puddles).
 struct EnhancedOut {
     @location(0) color: vec4<f32>,
     @location(1) mask: vec4<f32>,
@@ -360,6 +361,10 @@ struct EnhancedOut {
 var<private> rt_gbuf: vec4<f32>;
 var<private> rt_aux: vec4<f32>;
 
+/// The weight a `[matl_glow]` material's strength is read as (its mask carries that weight
+/// in `g`'s 0.5..0.95, see `fs_enhanced`; `post.wgsl` spells the same value out).
+const GLOW_WEIGHT_MAX: f32 = 64.0;
+
 @fragment
 fn fs_enhanced(in: FsIn) -> EnhancedOut {
     var puddle_weight = vec2<f32>(0.0);
@@ -368,19 +373,34 @@ fn fs_enhanced(in: FsIn) -> EnhancedOut {
     // an LED panel's dots stay in the glow's source (`post.wgsl`), the other screens'
     // letters stay out of it
     let led = select(0.0, 1.0, material.emissive.w < -1.5);
+    // A `[matl_glow]` material carries its own weight in g's 0.5..0.95 - its own strength,
+    // `material.glow.x`, what the mod declared (see `post.wgsl` `src_unmasked`) - and it
+    // takes the channel over: g = 1 is an LED panel's own dots, whose weight is the `Led
+    // glow` setting's, and a slot that is one *and* declares `[matl_glow]` (a `\S:n` panel,
+    // whose light map white all over is what made it an LED panel in the first place - with
+    // the keyword there is no light map, and `is_white_lightmap` reads that as white) would
+    // otherwise lose the mod's weight to the setting. So the slider never scales a mod's own
+    // declaration. (`GLOW_WEIGHT_MAX` is spelled out the same in post.wgsl.)
+    let own_light = material.glow.x > 0.0;
+    let glow_g = select(0.0, 0.5 + 0.45 * clamp(material.glow.x / GLOW_WEIGHT_MAX, 0.0, 1.0), own_light);
     var out: EnhancedOut;
     out.color = c;
     // The sub-0.5 range of g carries water's occluded sky weight; LED detection uses
     // step(0.5, g). This keeps scene hits independent of sky ambient occlusion.
     // A vehicle's shadow is light blocked from the road, not a new dry surface. Its
     // colour still blends normally, but it must preserve the road's reflection mask.
-    let coverage = select(select(c.a, 1.0, screen), 0.0, in.params2.w > 1.5);
+    // A `[matl_glow]` slot writes its coverage whole (`own_light`), as a screen does: the mask
+    // is blended by the coverage, so a half-covered slot would leave the channel's g between
+    // the two - and that range is where `post.wgsl` reads a mod's own weight, which a
+    // half-covered LED dot blends its 1 down into as well. Written whole, the slot's own value
+    // lands as it is and `m.a` tells the two apart there.
+    let coverage = select(select(c.a, 1.0, screen || own_light), 0.0, in.params2.w > 1.5);
     // (r under 0.5: how much light the player's bus's misted glass scatters there, for the
     // tone mapping's blur - post.wgsl `misted`. The mask is blended by the coverage, so the
     // share is divided by it to land as MIST_MASK x the share over what lies behind;
     // a misted pane's coverage is at least half its share, see `shade_enhanced`)
     let mist = select(0.0, glass_fog * MIST_MASK / max(coverage, 1e-3), glass_fog > 0.001);
-    out.mask = vec4<f32>(select(min(mist, 0.49), 1.0, screen), max(led, puddle_weight.y * 0.49), puddle_weight.x, coverage);
+    out.mask = vec4<f32>(select(min(mist, 0.49), 1.0, screen), max(select(led, glow_g, own_light), puddle_weight.y * 0.49), puddle_weight.x, coverage);
     //RT out.gbuf = rt_gbuf;
     //RT out.aux = rt_aux;
     return out;
@@ -404,6 +424,18 @@ fn display_level(t: vec3<f32>) -> vec3<f32> {
     let c = max(enh.debug.w, 1.0);
     let x = 0.18 * pow(tk / 0.18 + vec3<f32>(1e-7), vec3<f32>(1.0 / c));
     return x + 0.04 * smoothstep(vec3<f32>(0.0), vec3<f32>(0.08), x);
+}
+
+// [matl_glow] (see MaterialExtra::glow): the material is its own light. `buv` is where its
+// mask is read (the light map's own coordinate, the slot it rides in) and `col` the colour
+// the light is drawn in - the material's own, so a destination panel keeps the colour its
+// display draws. The mask is a greyscale picture of how much shines where (white full, black
+// none). The strength is the mod's own (the .cfg value x0.25, the `Led glow` setting's own
+// levels), so that setting never scales it. Called on the unlit path as well: a script's
+// texture is unlit and returns early, which is exactly the case that needs a light of its own.
+fn matl_glow_light(buv: vec2<f32>, col: vec3<f32>) -> vec3<f32> {
+    let gm = textureSample(t_light, s_diffuse, buv);
+    return col * dot(gm.rgb, vec3<f32>(0.299, 0.587, 0.114)) * material.glow.x * max(enh.exposure.z * 2.0, 0.8);
 }
 
 // How much of the light crossing the player's bus's pane at `world` its condensation
@@ -586,7 +618,12 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
         // ago, dark at night. Brightened like a display by the metering (up to 1.6 in the
         // dark) it showed a street far brighter than the one through the windscreen.
         let lift = select(display_dim(enh.exposure.y), min(enh.exposure.y, 1.0), material.params.y < 0.95);
-        let c = display_level(t) * lift;
+        var c = display_level(t) * lift;
+        // (its own light as well, where the mod declared one - this early return is exactly
+        // where a script's texture ends up)
+        if (material.glow.x > 0.0) {
+            c = c + matl_glow_light(buv, tex.rgb);
+        }
         return vec4<f32>(c * aer.a + aer.rgb * pre, alpha);
     }
     let outside = weather_outside_n(in.world, safe_normal(in.normal), terrain, in.params2.w);
@@ -1150,6 +1187,15 @@ fn shade_enhanced(in: FsIn, puddle_weight: ptr<function, vec2<f32>>, capture: bo
     } else if (material.emissive.w < -0.5) {
         // a display's text (see MaterialExtra::display)
         emit = emit + tex.rgb * 0.35 * max(enh.exposure.z * 2.0, 0.8) * display_dim(1.0);
+    }
+    if (material.glow.x > 0.0) {
+        // [matl_glow] (see `matl_glow_light`): the material is its own light, drawn in HDR -
+        // the picture it names is a greyscale mask of how much shines where, the light is the
+        // material's own colour, and the strength is the mod's own declaration (the .cfg value
+        // x0.25, the `Led glow` setting's levels: 6 is that default, 20 is brighter than its
+        // top - a flash), which that setting never scales. The classic picture does not know
+        // the keyword at all (`params2.x` is off, see `material()`).
+        emit = emit + matl_glow_light(buv, tex.rgb);
     }
     rgb = rgb + emit;
     if (enh.debug.x > 0.5) {

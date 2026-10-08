@@ -420,7 +420,7 @@ mouseevent setbone smoothskin animparent newanim (origin_trans origin_rot_x/y/z 
 anim_rot anim_trans offset delay maxspeed) visible illumination illumination_interior light
 light_enh light_enh_2 spotlight interiorlight texchanges matl matl_change matl_item
 matl_raindropmap matl_texadress_mirror/clamp/border/mirroronce texcoordtransX/Y useScriptTexture
-useTextTexture alphascale matl_freetex matl_lightmap matl_nightmap matl_allcolor smoke
+useTextTexture alphascale matl_freetex matl_lightmap matl_nightmap matl_glow matl_allcolor smoke
 particle_emitter PS_attachTo; material manager: matl_alpha matl_noZwrite matl_noZcheck matl_Zbias
 matl_envmap matl_envmaprealtime matl_bumpmap matl_envmap_mask matl_transmap.
 
@@ -967,3 +967,22 @@ items are washer water / condensation that only exist while the variable is on;
 the variant and add `texture × emissive` self-illumination (lower-deck lighting).
 `[matl_lightmap]` is a light *mask* multiplied with the diffuse texture (the SD202 maps
 `D86_02_L1.bmp` are grey masks of the lit atlas regions), scaled by its variable.
+
+`[matl_glow] <texture> <value>` (openOMSI, not Omsi.exe) makes the slot **its own light**,
+additively - a slot that also has a `[matl_lightmap]` keeps it. The named texture is a
+**greyscale mask** of how much shines where (white full, black none) and the light is the
+material's **own colour** - a destination panel's text keeps the colour its display draws. It
+is bound in the light map's slot, and the enhanced picture draws it in HDR: an unlit slot - one
+a script draws, which the enhanced picture otherwise shows as a display under the tone curve's
+knee - burns where it could not before. `value` is in the settings' own 16 levels
+(the `Led glow` slider's): the shader's strength is `value * 0.25`, so `6` is that slider's
+default, `5` a turn indicator, and `20` is brighter than the slider's top (a flash). That same
+number is the slot's weight in the glow's source, riding in the screen mask's g's 0.5..0.95 and
+taking that channel over (1 there is an LED panel's own dots, whose weight is the setting's) -
+so a `\S:n` panel that declares the keyword keeps the mod's number rather than the slider's,
+and `Led glow` at 0 leaves the material lit where those dots go dark and flat. (The glow's
+first level averages its taps by luminance, so a wide bright face keeps that weight and a thin
+one - a few letters over a dark panel - comes out a faint mix whatever the number is.) The
+classic picture draws the slot as if the keyword were not there (the light map's slot carries
+the mask, `params2.x` stays off) - the one place an openOMSI keyword changes only the enhanced
+picture.

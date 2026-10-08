@@ -6443,7 +6443,13 @@ impl World {
                 // lenses are lit by their light maps stayed dark, #826.)
                 let light = match slot_ov.iter().find_map(|o| o.lightmap.clone()) {
                     Some((name, _)) => tex_of(gpu, scene, &name, &mut t),
-                    None => None,
+                    // ([matl_glow]: the material is its own light - its picture is bound
+                    // here, in the light map's slot, and `params2.x` is left off below, so
+                    // the classic picture draws the slot as if the keyword were not there)
+                    None => slot_ov
+                        .iter()
+                        .find_map(|o| o.glow.as_ref())
+                        .and_then(|(name, _)| tex_of(gpu, scene, name, &mut t)),
                 };
                 let base = renderer.add_material_extra(
                     scene, tex, alpha, color, false, transmap, night, light, envmap, emissive, extra,
@@ -10662,6 +10668,12 @@ fn material_extra(
             .filter(|o| o.tex_address == omsi_model::TexAddress::Border)
             .map(|o| o.border_color.map(|c| (c / 255.0).clamp(0.0, 1.0))),
         metal_ok: false,
+        // ([matl_glow]: the material is its own light - its picture is bound in the light
+        // map's slot by the callers, and this is the strength, in the settings' own 16
+        // levels x0.25 (6 = the `Led glow` default). It is also the slot's weight in the
+        // glow's source, so being a mod's own declaration the `Led glow` setting never
+        // scales it; 0 when the keyword is not there.)
+        glow: ov.iter().filter_map(|o| o.glow.as_ref()).next_back().map(|(_, v)| (v * 0.25).max(0.0)).unwrap_or(0.0),
     }
 }
 
@@ -12826,6 +12838,11 @@ impl World {
                     });
                     let lightmap = ov.iter().find_map(|o| o.lightmap.clone()).and_then(|(t, _)| {
                         tex!(&subst(&t), &dirs_ref)
+                    }).or_else(|| {
+                        // ([matl_glow]: the material is its own light - its picture rides in
+                        // the light map's slot, `params2.x` left off below so the classic
+                        // picture is as if the keyword were not there)
+                        ov.iter().find_map(|o| o.glow.as_ref()).and_then(|(t, _)| tex!(&subst(t), &dirs_ref))
                     });
                     // (a `\S:n` panel lit all over by its light map is an LED panel; one
                     // whose light map is a picture is a flipdot: see `is_white_lightmap`)
@@ -14529,6 +14546,39 @@ mod material_tests {
         assert_eq!(screen.transmap.as_deref(), Some("\\S:1"));
         assert!(material_extra(&[screen], None, None, [0.0; 4]).transmap_declared);
         assert!(!material_extra(&[plain], None, None, [0.0; 4]).transmap_declared);
+    }
+
+    /// `[matl_glow] <texture> <value>`: the material is its own light - the strength the
+    /// shader reads is the .cfg value x0.25 (the `Led glow` setting's own levels, and the
+    /// slot's weight in the glow's source too). The last command of the slot wins, as the
+    /// other `[matl_*]` commands do.
+    #[test]
+    fn matl_glow_gives_a_material_its_own_light() {
+        let plain = MaterialDef {
+            texture: "body.dds".into(),
+            ..Default::default()
+        };
+        assert_eq!(material_extra(&[&plain], None, None, [0.0; 4]).glow, 0.0);
+        let lit = MaterialDef {
+            texture: "body.dds".into(),
+            glow: Some(("mask.png".into(), 20.0)),
+            ..Default::default()
+        };
+        assert_eq!(material_extra(&[&lit], None, None, [0.0; 4]).glow, 5.0);
+        // 6 is the `Led glow` slider's own default level
+        let softer = MaterialDef {
+            texture: "body.dds".into(),
+            glow: Some(("mask.png".into(), 6.0)),
+            ..Default::default()
+        };
+        assert_eq!(material_extra(&[&lit, &softer], None, None, [0.0; 4]).glow, 1.5);
+        // a negative value lights nothing (it is not a light that can be subtracted)
+        let odd = MaterialDef {
+            texture: "body.dds".into(),
+            glow: Some(("m.png".into(), -3.0)),
+            ..Default::default()
+        };
+        assert_eq!(material_extra(&[&odd], None, None, [0.0; 4]).glow, 0.0);
     }
 
     #[test]
