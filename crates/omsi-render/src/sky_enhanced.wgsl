@@ -147,7 +147,11 @@ fn cloud_sigma(p: vec3<f32>, h: f32, coverage: f32, lod: f32, detail: bool) -> f
     let body = clamp(margin / CLOUD_BODY_RANGE, 0.0, 1.0);
     m = edge * mix(1.0, body, CLOUD_BODY_WEIGHT) * cloud_depth(shape.y);
     m = m * min(h / CLOUD_BOTTOM_SOFTNESS, 1.0);
-    return m * CLOUD_SIGMA;
+    // How deep the sky's clouds go is the deck's to say, not a lone heap's: a
+    // fair-weather cumulus keeps the scale the look was tuned on, and it is a rising
+    // cover - a storm's denser droplets - that takes it up to 2.6 times under a shut one.
+    let storm = smoothstep(0.55, 0.95, camera.clouds.x);
+    return m * CLOUD_SIGMA * (1.0 + 1.6 * storm);
 }
 
 // The clouds towards d in front of `below` (the sky behind them): rgb the picture, a how
@@ -227,7 +231,14 @@ fn cloud_layer(d: vec3<f32>, below: vec3<f32>, pix: f32) -> vec4<f32> {
             // heaps stand, paler where the deck thins - and deepens a cumulus's shadowed
             // side without touching its sunlit top, where the depth towards the sun is
             // small.
-            let amb = mix(ground * 0.45 + sky_top * 0.55, sky_top * 1.1, clamp(h * 1.4, 0.0, 1.0)) * (0.40 + 0.60 * exp(-od * 0.055));
+            // The depth that darkens a base is the deck's own, not the heap's: a sky of
+            // a few fair-weather clouds keeps the light its base had (the shipped curve,
+            // exactly), and only as the cover rises does a base follow its depth down
+            // towards the grey of a storm.
+            let deep = smoothstep(0.6, 0.85, camera.clouds.x);
+            let shade = mix(0.40, 0.04, deep);
+            let coef = mix(0.055, 0.09, deep);
+            let amb = mix(ground * 0.45 + sky_top * 0.55, sky_top * 1.1, clamp(h * 1.4, 0.0, 1.0)) * (shade + (1.0 - shade) * exp(-od * coef));
             let light = direct * CLOUD_MS_GAIN + amb;
             // Frostbite: the light scattered over the step, dimmed by the cloud before it
             let dt = exp(-sigma * ds);
@@ -249,8 +260,10 @@ fn cloud_layer(d: vec3<f32>, below: vec3<f32>, pix: f32) -> vec4<f32> {
     let a = (1.0 - trans) * fade * horizon_fade;
     acc = mix(acc, below * (1.0 - trans), aerial) * fade * horizon_fade;
     var col = acc + (1.0 - a) * below;
-    let deck = below * (0.75 + 0.35 * cloud_cover_at(cloud_ground(d, max(t0, 1.0)), 4.0).x);
-    col = mix(col, deck, closed);
+    // (A shut sky has no sheet of grey over it any more: at a closed cover or in rain a
+    // flat card used to be laid over the clouds to read as overcast, one even tone with
+    // nothing in it. The deck itself carries it now - as dark as it is deep, and with
+    // its own heaps in it; `closed` stays on to hide the high veil under a shut sky.)
     // the high, thin layer
     let drift = camera.clouds.yz * 2500.0;
     let t_hi = 7000.0 / max(d.z, 0.02);
