@@ -639,6 +639,40 @@ fn row_start(att: &SplineAttachment, spline: &MapSpline, index: Option<&MapIndex
     Some(RowStart { s: d0, j: 0, backwards: false, d0, acc: 0.0 })
 }
 
+/// The distance of a spline from the start of its own tile's chain: the `prev` links of the
+/// same tile's splines, a tile's chains being cut where the spline before lies in another
+/// tile. (Not the file's stored offset: Omsi.exe's records before their own spline are
+/// recognised by it with the chains as the tile reads them.)
+fn tile_chain_offset(splines: &[MapSpline], si: usize) -> f64 {
+    let mut cur = si;
+    let mut total = 0.0;
+    let mut seen: Vec<i64> = vec![splines[si].id];
+    loop {
+        let prev = splines[cur].prev_id;
+        if prev == 0 || seen.contains(&prev) || seen.len() > 500 {
+            break;
+        }
+        let Some(pi) = splines.iter().position(|s| s.id == prev) else { break };
+        seen.push(prev);
+        total += splines[pi].length.max(0.0);
+        cur = pi;
+    }
+    total
+}
+
+/// Whether Omsi.exe refuses this record: its first object would lie before the record's own
+/// spline (start distance smaller than the spline's place in its chain). Verified against
+/// Omsi.exe on Berlin-Spandau, 2026-10-11: `[splineAttachement]` records laid out with start
+/// -5.5 (lateral 0) and start -1.5 (lateral -6) are not drawn by it, and neither is a start
+/// of +5 on a spline 27 m into its chain, while start +37.5 with lateral 0 is.
+pub fn row_starts_before_its_spline(att: &SplineAttachment, splines: &[MapSpline]) -> bool {
+    let si = att.spline_index.max(0) as usize;
+    if si >= splines.len() || splines[si].deleted {
+        return false;
+    }
+    att.offset[2] - tile_chain_offset(splines, si) < -1e-6
+}
+
 /// The objects of row record `att` on `spline` from `start` on, while `j * interval <= range`.
 fn place_on(att: &SplineAttachment, spline: &MapSpline, origin: DVec2, index: Option<&MapIndex>, start: RowStart) -> Vec<RowObject> {
     let curve = SplineCurve { half_cant_width: omsi_geometry::half_cant_width_of(&spline.file), ..SplineCurve::from_map(spline, origin) };

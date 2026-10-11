@@ -909,15 +909,21 @@ impl World {
             if !wanted(&a.file) {
                 continue;
             }
-            // A row that runs *along* the carriageway (no lateral offset) and starts *before*
-            // the chain it is attached to is a broken write and never seen in OMSI: Grundorf
-            // Island 4's `bridge_pier` row 3275328 in tile -2,0 carries lateral offset 0 and
-            // start distance -32 where the row beside it (3275329, the same piers under the
-            // same bridge) carries -32 and 0 - the two fields the wrong way round. Laid out,
-            // its piers stand in the road; Omsi.exe drops the record, and so do we.
-            if a.repeater.is_none() && a.offset[0].abs() < 1e-6 && a.offset[2] < 0.0 {
+            // A row record whose first object lies before the record's own spline is not
+            // drawn by Omsi.exe - whatever its lateral offset, and whether the start reads
+            // negative or positive: verified against it on a Berlin-Spandau street (2026-10-11)
+            // with records laid out for the purpose: lateral 0 with start -5.5 and lateral -6
+            // with start -1.5 are not drawn, lateral 0 with start +37.5 is, and a start of +5
+            // on a spline 27 m into its chain - its first object 22 m before that spline - is
+            // not either. Grundorf Island 4's `bridge_pier` row 3275328 in tile -2,0 (lateral
+            // 0, start -32) is one of this kind; laid out, its piers stand in the road and
+            // OMSI never shows them.
+            // (Repeaters stay as they are: their copies carry the master's numbers, and the
+            // few that read before their own spline - 8 of Berlin-Spandau's 216 - stay drawn
+            // until OMSI's way with them has been seen.)
+            if a.repeater.is_none() && crate::tiles::row_starts_before_its_spline(a, &tile.splines) {
                 if row_broken == 0 || debug_outside {
-                    log::info!("row {} of {} in tile ({tx}, {ty}) starts {:.1} m before its chain with no lateral offset: not shown, as in OMSI", a.id, a.file, a.offset[2]);
+                    log::info!("row {} of {} in tile ({tx}, {ty}) starts before its own spline: not shown, as in OMSI", a.id, a.file);
                 }
                 row_broken += 1;
                 continue;
@@ -989,7 +995,7 @@ impl World {
             log::info!("tile ({tx}, {ty}): {row_outside} spline row objects lie outside the tile and are not shown, as in OMSI");
         }
         if row_broken > 1 {
-            log::info!("tile ({tx}, {ty}): {row_broken} spline rows start before their chain with no lateral offset and are not shown, as in OMSI");
+            log::info!("tile ({tx}, {ty}): {row_broken} spline rows start before their own spline and are not shown, as in OMSI");
         }
         rows
     }
