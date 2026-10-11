@@ -903,7 +903,6 @@ impl World {
         }
         // [splineAttachement] rows and their repeaters
         let mut rows = 0usize;
-        let mut row_outside = 0usize;
         let mut row_broken = 0usize;
         for a in &tile.spline_attachments {
             if !wanted(&a.file) {
@@ -926,13 +925,16 @@ impl World {
             if objs.is_empty() || a.file.trim().is_empty() {
                 continue;
             }
-            // A row's object that lands outside this tile is never seen in OMSI either: the
-            // row stands over its spline but the objects are offset to the side of it (Grundorf
-            // Island 4's viaduct rows 33 m out), so the far side of a row near the tile's edge
-            // lies in the neighbouring tile, and Omsi.exe finds every object's height with a
-            // ray onto *this* tile's terrain only and drops what the ray misses - the same rule
-            // the `[object]` list above is drawn by (#787). An `[absheight]` type casts no
-            // such ray, so its row objects stay wherever they fall, as in that list.
+            // A row's objects are drawn wherever they fall, this tile's edge or not: the row
+            // stands over its spline with its objects offset to the side of it, so the far side
+            // of a row near the edge reaches into the neighbouring tile - the car park row of
+            // Berlin-Spandau tile (2394, 11285) along its street, say. 0.2.30 left those out on
+            // the guess that Omsi.exe's ground ray buries a row object it misses, as it does
+            // the `[object]` list above (#787); looked at in Omsi.exe itself on 2026-10-11,
+            // the row of parked cars that row carries past the edge stands in the neighbouring
+            // tile as it does here, so a row object is not buried - or no case of the ray
+            // taking one has been seen. Drawn again, the far side of such a row holds its
+            // objects, as Omsi.exe holds them.
             // without its own type the whole row is missing; otherwise each object is on
             // its own (a car park row leaves some spaces empty)
             let Some(row_type) = self.object_type(&a.file) else {
@@ -940,25 +942,6 @@ impl World {
                 counts.lock().failed_objects += 1;
                 continue;
             };
-            let absolute = row_type.sco.absolute_height();
-            let edge = tile_size() + 1e-3;
-            let objs: Vec<_> = objs
-                .into_iter()
-                .filter(|(_, ro)| {
-                    let (x, y) = (ro.pose.pos.x - origin2.x, ro.pose.pos.y - origin2.y);
-                    if absolute || ((-1e-3..=edge).contains(&x) && (-1e-3..=edge).contains(&y)) {
-                        return true;
-                    }
-                    if row_outside == 0 || debug_outside {
-                        log::info!("row {} object {} of {} at ({:.1}, {:.1}) lies outside tile ({tx}, {ty}): not shown, as in OMSI", a.id, ro.index, a.file, x, y);
-                    }
-                    row_outside += 1;
-                    false
-                })
-                .collect();
-            if objs.is_empty() {
-                continue;
-            }
             rows += 1;
             let first = objs.iter().map(|o| o.1.index).min().unwrap_or(0);
             for (_, ro) in objs {
@@ -984,9 +967,6 @@ impl World {
                     key,
                 });
             }
-        }
-        if row_outside > 1 {
-            log::info!("tile ({tx}, {ty}): {row_outside} spline row objects lie outside the tile and are not shown, as in OMSI");
         }
         if row_broken > 1 {
             log::info!("tile ({tx}, {ty}): {row_broken} spline rows start before their chain with no lateral offset and are not shown, as in OMSI");
