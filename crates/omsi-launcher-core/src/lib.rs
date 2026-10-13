@@ -258,10 +258,9 @@ pub fn content_path(rel: &str) -> Result<PathBuf> {
     resolve_content(rel)
 }
 
-/// The depot file a bus uses on `map` on `date`: the one the map's own buses use that day
-/// (the chrono scenarios change it: Berlin's 1994 depot has line 137 where 1986's had 92),
-/// one of the bus's carrying the line driven, the bus's own of that name or one named like
-/// the map, else the bus's first (#896).
+/// The depot file a bus uses on `map` on `date`: the map's own buses' of that day (chrono
+/// scenarios move it - Berlin's 1994 depot has 137, 1986's 92), one of the bus's carrying
+/// the line driven, its own of that name or named like the map, else the first (#896).
 pub fn default_hof(map: Option<&MapInfo>, bus: Option<&VehicleInfo>, date: &str, line: Option<&str>) -> String {
     let on_date = map.and_then(|m| {
         let dir = resolve_content(&m.file).ok()?;
@@ -345,9 +344,8 @@ pub fn content_dir() -> Option<PathBuf> {
 }
 
 /// Tell the OMSI readers about the content folder, the archives used in place in its
-/// `Archives` folder and the OMSI folder (in that order, as the game has them), so that a
-/// path inside one is also looked for in the others (a repaint's `.cti` in the content
-/// folder's copy of a stock bus folder, a map inside an archive).
+/// `Archives` folder and the OMSI folder (in that order, as the game has them), so a path
+/// inside one is also looked for in the others (a repaint's `.cti`, a map in an archive).
 fn register_roots(content: &Path) {
     static DONE: std::sync::Once = std::sync::Once::new();
     let content = content.to_path_buf();
@@ -1947,12 +1945,9 @@ pub fn graphics_mode(v: &str) -> &'static str {
 /// The Graphics settings' quality presets - Low, Medium, High and Ultra - for the graphics
 /// mode chosen (`graphics_mode`), shared by the launcher and the game's options. A preset
 /// tunes that mode and keeps it: it never switches Enhanced or ray tracing on or off.
-/// Vanilla's leave out what OMSI 2 does not draw (sun shadows, ambient occlusion, detail
-/// texturing); the enhanced modes, whose pixels cost more, take fewer MSAA samples and a
-/// smaller render scale at the lower levels, and Enhanced+ (which traces its shadows,
-/// occlusion and reflections) smaller shadow maps and mirrors too. High is the defaults
-/// of a computer in Vanilla+. The texture memory stays automatic: the renderer sizes it
-/// to the device (a fixed 800 MB blurred a large card's textures and overfilled a phone).
+/// Vanilla's leave out what OMSI 2 does not draw; High is the defaults of Vanilla+; the
+/// enhanced modes take fewer MSAA samples and a smaller render scale below High, and
+/// Enhanced+ smaller shadow maps and mirrors too. The texture memory stays automatic.
 pub fn graphics_presets_for(mode: &str) -> [(&'static str, Value); 4] {
     let mode = graphics_mode(mode);
     let classic = mode == "vanilla";
