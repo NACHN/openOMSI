@@ -102,7 +102,7 @@ pub(super) fn object_html_pages(
     if let Some((_, o3d_mats, overrides)) = ot.meshes.get(mi) {
         for o in overrides.iter().filter(|o| !o.item) {
             let Some(page) = o.use_script_texture.map(|n| n.max(0) as usize) else { continue };
-            let Some(def) = ot.model.html_textures.iter().find(|d| d.script_index == page) else { continue };
+            let Some(def) = ot.model.html_page(page) else { continue };
             let Some(slot) = omsi_sim::vehicle::override_slot(o3d_mats, o) else { continue };
             let mat = match html_mats.get(&page) {
                 Some(m) => *m,

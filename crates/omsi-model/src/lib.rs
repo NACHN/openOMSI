@@ -216,8 +216,9 @@ pub struct HtmlTextureDef {
     /// `lit`, the word on the line after the page's path: the page is a **surface** - shaded
     /// by the world's light like every other material - rather than the display such a page
     /// is by default, drawn unlit at its own brightness, which is what a bus's own panel is.
-    /// The slots that take their picture from this page are drawn lit with it. An openOMSI
-    /// extension: Omsi.exe knows neither part, and draws such a slot unlit.
+    /// The slots that take their picture from this page are drawn lit with it, wherever
+    /// they are - a scenery object's and a vehicle's alike (`Model::html_page_lit`). An
+    /// openOMSI extension: Omsi.exe knows neither part, and draws such a slot unlit.
     pub lit: bool,
 }
 
@@ -487,6 +488,20 @@ impl Model {
             self.meshes.iter().filter_map(|m| m.terrain_hole.as_deref())
                 .filter(move |f| !self.terrain_holes.iter().any(|declared| declared.as_str() == *f)),
         )
+    }
+
+    /// The `[htmltexture]` page a script texture index stands for, when it is one: a slot
+    /// is bound to a page with `[useHtmlTexture]`, or with `[useScriptTexture]` naming
+    /// the page's index. Every consumer of a page asks here.
+    pub fn html_page(&self, script_index: usize) -> Option<&HtmlTextureDef> {
+        self.html_textures.iter().find(|h| h.script_index == script_index)
+    }
+
+    /// Whether that page declares itself a surface (`lit` after its path): the word is
+    /// the page's own, so every place the page reaches a material follows it - a scenery
+    /// object's slots and a vehicle's alike (see `docs/HTMLTEXTURE.md`).
+    pub fn html_page_lit(&self, script_index: usize) -> bool {
+        self.html_page(script_index).is_some_and(|h| h.lit)
     }
 
     pub fn load(path: &Path) -> Result<Model, omsi_cfg::CfgError> {
@@ -1440,6 +1455,9 @@ mod tests {
         let text = "[htmltexture]\n64\n32\nsign.html\nlit\n\n[htmltexture]\n64\n32\nother.html\n\n[mesh]\nx.o3d\n";
         let m = Model::parse(&omsi_cfg::CfgFile::from_str("model.cfg", text));
         assert!(m.html_textures[0].lit && !m.html_textures[1].lit, "each page has its own word");
+        assert!(m.html_page_lit(0) && !m.html_page_lit(1), "the lookup every consumer asks");
+        assert_eq!(m.html_page(1).map(|p| p.path.as_str()), Some("other.html"));
+        assert!(m.html_page(2).is_none(), "no page of that script index");
     }
 
     /// A tab-indented block (the stock F90 lorry's second rear axle, whose mesh does not

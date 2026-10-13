@@ -137,6 +137,7 @@ fn freetex_test_look() -> Look {
         color: [1.0; 4],
         emissive: [0.0; 3],
         unlit: false,
+        lit: false,
         diffuse: None,
         transmap: None,
         night: None,
@@ -145,6 +146,21 @@ fn freetex_test_look() -> Look {
         extra: MaterialExtra::default(),
         dyn_tex: DynTex::default(),
     }
+}
+
+/// A page's `lit` word is the slot's too: its material is a surface, not the bus's own
+/// unlit display. The flag rides down with the `Look` (`DynSlot`s carry it likewise,
+/// see `instantiate_vehicle`); without it a script texture stays a display.
+#[test]
+fn a_lit_pages_slot_is_not_drawn_unlit() {
+    let mut look = freetex_test_look();
+    look.dyn_tex = DynTex { script: Some(3), ..DynTex::default() };
+    assert!(look.for_vehicle(&[], &[]).unlit, "a script texture is the bus's display");
+    look.lit = true;
+    assert!(!look.for_vehicle(&[], &[]).unlit, "the page said lit: a surface");
+    // (a slot of no script texture is untouched by either)
+    look.dyn_tex = DynTex::default();
+    assert!(!look.for_vehicle(&[], &[]).unlit);
 }
 
 /// An LED panel's light map is one white pixel; a flipdot's is a picture with dark

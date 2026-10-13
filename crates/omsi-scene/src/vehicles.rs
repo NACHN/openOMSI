@@ -708,20 +708,24 @@ impl World {
                     (d.color, d.emissive)
                 };
                 renderer.address_next.set(d.address);
-                // a script's screen (matrix displays, the IBIS's picture, LCDs) likewise
                 let mut extra = d.extra;
-                extra.screen = d.script.is_some() || d.script_trans.is_some();
                 // ... and a `\S:n` mask makes it an LED panel: its lit dots are its own
                 // light, which the enhanced picture blooms (see `MaterialExtra::led`)
                 // (a page drawn as an LED panel carries its dot mask as a plain transmap)
                 // (unless the modeller has said so, `[led_glow_effect]`)
                 extra.led = d.extra.led && (d.extra.led_glow.is_some() || d.script_trans.is_some() || (d.script.is_some() && d.transmap.is_some()));
+                // a script's screen (matrix displays, the IBIS's picture, LCDs) likewise -
+                // unless the script is a page that says `lit`: a surface is no screen
+                // (an LED page keeps the screen, though: its dots stay a display's own
+                // light - the glow's dot boost - which a burning surface does not give)
+                extra.screen = (d.script.is_some() || d.script_trans.is_some()) && (!d.lit || extra.led);
                 let m = renderer.add_material_extra(
                     scene,
                     tex,
                     alpha,
                     color,
-                    d.script.is_some(),
+                    // (the page's `lit` word, with it: the material is no unlit display)
+                    d.script.is_some() && !d.lit,
                     transmap,
                     d.night,
                     d.lightmap,
@@ -1003,6 +1007,10 @@ impl World {
         let (text_slot, script_slot) = (text_of(None), script_of(None));
         let (text_base, script_base) = if itemised { (text_of(Some(false)), script_of(Some(false))) } else { (text_slot, script_slot) };
         let (text_item, script_item) = (text_of(Some(true)).or(text_base), script_of(Some(true)).or(script_base));
+        // a page's `lit` word, asked of the page itself (`Model::html_page_lit`): the
+        // slot is drawn as a surface with the answer, wherever the page is used
+        let page_lit = |s: Option<usize>| s.is_some_and(|i| vt.model.html_page_lit(i));
+        let base_lit = page_lit(script_base);
         let tex_name = subst(&m.texture);
         // The film of water on the glass (`[alphascale] Rain_Window_…`) wears
         // snow crystals while it snows, unless the vehicle brings a seasonal
@@ -1152,11 +1160,14 @@ impl World {
             // (an item without a night map of its own keeps the plain one, lit
             // the same way)
             it_extra.night_switched = it_night.is_some();
-            it_extra.screen = script_item.is_some() || it_script_trans.is_some();
+            let it_page = script_item.and_then(|s| vt.model.html_page(s));
+            let it_lit = it_page.is_some_and(|p| p.lit);
             // (the item's `\S:n`, or the one it inherits from its base - or a page's own
             // dot mask - keeps it an LED panel: see `MaterialExtra::led`)
-            let it_page = script_item.is_some_and(|s| vt.model.html_textures.iter().any(|h| h.script_index == s));
-            (it_extra.led, it_extra.led_sign) = ((it_script_trans.is_some() || (it_page && it_trans.is_some())) && if ov_item.iter().any(|o| o.lightmap.is_some()) { lm_white(ov_item) } else { lm_white(&ov) }, it_page);
+            (it_extra.led, it_extra.led_sign) = ((it_script_trans.is_some() || (it_page.is_some() && it_trans.is_some())) && if ov_item.iter().any(|o| o.lightmap.is_some()) { lm_white(ov_item) } else { lm_white(&ov) }, it_page.is_some());
+            // (a page's `lit` word reaches the item too: a surface is no screen -
+            // an LED page keeps it, as the base's does)
+            it_extra.screen = (script_item.is_some() || it_script_trans.is_some()) && (!it_lit || it_extra.led);
             apply_led_glow_effect(&mut it_extra, if led_glow_effect(ov_item).is_some() { ov_item } else { &ov });
             it_extra.no_z_write |= extra.no_z_write;
             it_extra.no_z_check |= extra.no_z_check;
@@ -1165,7 +1176,7 @@ impl World {
                 it_extra.no_z_check = false;
             }
             let it_dyn = DynTex { text: text_item, script: script_item, script_trans: it_script_trans, address };
-            Look { alpha: it_alpha, color: it_color, emissive: it_emissive, unlit: false, diffuse: None, transmap: it_trans, night: it_night, lightmap: it_light, envmap, extra: it_extra, dyn_tex: it_dyn }
+            Look { alpha: it_alpha, color: it_color, emissive: it_emissive, unlit: false, lit: it_lit, diffuse: None, transmap: it_trans, night: it_night, lightmap: it_light, envmap, extra: it_extra, dyn_tex: it_dyn }
         };
         let first_item: Vec<&MaterialDef> = ov_item.iter().copied().filter(|o| !later_items.iter().any(|l| std::ptr::eq(*l, *o))).collect();
         let item_spec = (change_var.is_some() && !ov_item.is_empty()).then(|| item_look(&first_item));
@@ -1178,7 +1189,7 @@ impl World {
         // [matl_noZwrite]: glass, the rain film and the dirt layer are blended
         // and must not write depth, or everything blended behind them is thrown
         // away and the window turns into a pale hole in the world
-        let spec = SlotSpec { base: Look { alpha, color, emissive, unlit, diffuse: None, transmap, night, lightmap, envmap, extra, dyn_tex: base_dyn }, item: item_spec, more: more_items };
+        let spec = SlotSpec { base: Look { alpha, color, emissive, unlit, lit: base_lit, diffuse: None, transmap, night, lightmap, envmap, extra, dyn_tex: base_dyn }, item: item_spec, more: more_items };
         // [texchanges]: the texture named in the mesh is only a key - the master
         // of that name holds the textures a script variable switches between
         // (the SD200's roller blinds, the seat covers of the AI interior).
@@ -1246,7 +1257,7 @@ impl World {
         } else if let Some(lights) = multi_light(base, item) {
             variants.push(VariantSlot { mesh: instances.len(), slot, base, item, more: Vec::new(), var: String::new(), more_vars: Vec::new(), entries, tex_var: String::new(), free: Vec::new(), spec, base_tex, entry_tex, lights: Some(lights) });
         } else if base_dyn.any() {
-            dyn_slots.push(DynSlot { mesh: instances.len(), slot, text: text_slot, script: script_slot, script_trans, tex, alpha, transmap, night, lightmap, envmap, address, extra, color, emissive });
+            dyn_slots.push(DynSlot { mesh: instances.len(), slot, text: text_slot, script: script_slot, script_trans, lit: page_lit(script_slot), tex, alpha, transmap, night, lightmap, envmap, address, extra, color, emissive });
         }
         base
     }
@@ -1431,13 +1442,17 @@ fn slot_extra(
     // `[matl_item]` variant keeps its materials here, not in `dyn_slots`:
     // without the flags on this `extra` the K++ and Krueger panels showed
     // their dots but never glowed.
-    extra.screen = script_slot.is_some() || script_trans.is_some();
+    // (a page's `lit` word, though, makes its slot a surface: drawn lit and no screen -
+    // see `Model::html_page_lit`; the item path and the dyn slots ask the same page -
+    // an LED page keeps the screen, below: its dots are a display's own light)
+    let html_page = script_slot.and_then(|s| cx.vt.model.html_page(s));
     // ... and so is a page (`[useHtmlTexture]`) drawn as an LED panel: its picture
     // is the dots' colour and a dot mask its `[matl_transmap]` (a page is a
     // script texture of its own, so the Krueger's `\S:n` mask cannot be reused)
-    let html_page = script_slot.is_some_and(|s| cx.vt.model.html_textures.iter().any(|h| h.script_index == s));
-    extra.led = (script_trans.is_some() || (html_page && has_transmap)) && lm_white(ov);
-    extra.led_sign = html_page;
+    extra.led = (script_trans.is_some() || (html_page.is_some() && has_transmap)) && lm_white(ov);
+    extra.led_sign = html_page.is_some();
+    extra.screen = (script_slot.is_some() || script_trans.is_some())
+        && (!html_page.is_some_and(|p| p.lit) || extra.led);
     apply_led_glow_effect(&mut extra, ov);
     if dirt_overlay {
         extra.no_z_write = true;

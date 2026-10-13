@@ -49,6 +49,9 @@ pub struct DynSlot {
     pub text: Option<usize>,
     pub script: Option<usize>,
     pub script_trans: Option<usize>,
+    /// The script texture's page says `lit` (`Model::html_page_lit`): the material is
+    /// made lit with the slot's others, not drawn as the display such a page is.
+    pub lit: bool,
     pub tex: Option<TextureId>,
     pub alpha: AlphaMode,
     pub transmap: Option<(TextureId, bool)>,
@@ -263,6 +266,9 @@ pub struct Look {
     pub(super) color: [f32; 4],
     pub(super) emissive: [f32; 3],
     pub(super) unlit: bool,
+    /// The script texture's page says `lit` (`Model::html_page_lit`): the half is
+    /// shaded as a surface, not drawn as the display such a page is.
+    pub(super) lit: bool,
     /// A picture of the vehicle's own in place of the diffuse texture (see `DynTex`).
     pub(super) diffuse: Option<TextureId>,
     pub(super) transmap: Option<(TextureId, bool)>,
@@ -354,7 +360,9 @@ impl Look {
         if d.script.is_some() {
             l.color = [1.0; 4];
             l.emissive = [0.0; 3];
-            l.unlit = true;
+            // ... unlit, unless the script is a page whose `[htmltexture]` block says
+            // `lit`: the word is the page's own and rode down on the `Look`
+            l.unlit = !l.lit;
         }
         l
     }
