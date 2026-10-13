@@ -11,6 +11,7 @@ mod extensions;
 pub use extensions::SpotlightCookie;
 #[cfg(test)]
 mod extension_tests;
+mod pages;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnimOrigin {
@@ -490,20 +491,6 @@ impl Model {
         )
     }
 
-    /// The `[htmltexture]` page a script texture index stands for, when it is one: a slot
-    /// is bound to a page with `[useHtmlTexture]`, or with `[useScriptTexture]` naming
-    /// the page's index. Every consumer of a page asks here.
-    pub fn html_page(&self, script_index: usize) -> Option<&HtmlTextureDef> {
-        self.html_textures.iter().find(|h| h.script_index == script_index)
-    }
-
-    /// Whether that page declares itself a surface (`lit` after its path): the word is
-    /// the page's own, so every place the page reaches a material follows it - a scenery
-    /// object's slots and a vehicle's alike (see `docs/HTMLTEXTURE.md`).
-    pub fn html_page_lit(&self, script_index: usize) -> bool {
-        self.html_page(script_index).is_some_and(|h| h.lit)
-    }
-
     pub fn load(path: &Path) -> Result<Model, omsi_cfg::CfgError> {
         let f = CfgFile::read(path)?;
         Ok(Self::parse(&f))
@@ -596,8 +583,7 @@ impl Model {
     }
 
     /// `lit`, the word on the line after a page's path (see `HtmlTextureDef::lit`): taken
-    /// when it is there, and only that word - a next line holding anything else (a blank,
-    /// another keyword) leaves the reader where it was.
+    /// when it is there, and only that word - anything else leaves the reader where it was.
     fn take_lit_flag(r: &mut CfgReader<'_>) -> bool {
         let mut ahead = r.clone();
         if ahead.word().eq_ignore_ascii_case("lit") {
